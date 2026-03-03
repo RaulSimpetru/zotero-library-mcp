@@ -4,3 +4,5 @@ __pycache__/
 .claude/
 .serena/
 .env
+.mcpregistry_*
+dist/

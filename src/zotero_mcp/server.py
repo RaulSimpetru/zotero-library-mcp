@@ -2,6 +2,7 @@
 
 import os
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -142,6 +143,42 @@ async def _resolve_doi(doi: str) -> dict[str, Any]:
         resp = await client.get(f"{CROSSREF_API}/{doi}", headers=headers)
         resp.raise_for_status()
         return resp.json()
+
+
+UNPAYWALL_API = "https://api.unpaywall.org/v2"
+
+
+async def _find_open_access_pdf(doi: str) -> str | None:
+    """Query Unpaywall for an open-access PDF URL. Returns URL or None."""
+    email = CROSSREF_MAILTO or "zotero-mcp@example.com"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{UNPAYWALL_API}/{doi}", params={"email": email})
+            resp.raise_for_status()
+            data = resp.json()
+        best = data.get("best_oa_location") or {}
+        return best.get("url_for_pdf") or best.get("url")
+    except Exception:
+        return None
+
+
+async def _attach_pdf_from_url(zot: zotero.Zotero, parent_key: str, url: str) -> str | None:
+    """Download a PDF from a URL and attach it to a Zotero item. Returns attachment key or None."""
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if "pdf" not in content_type and not resp.content[:5] == b"%PDF-":
+                return None
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+                f.write(resp.content)
+                tmp_path = f.name
+        zot.attachment_simple([tmp_path], parent_key)
+        os.unlink(tmp_path)
+        return parent_key
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +366,12 @@ async def add_paper_by_doi(doi: str, collection_id: str | None = None) -> str:
         created = list(result["successful"].values())[0]
         key = created.get("key", "unknown")
         title = created.get("data", {}).get("title", item["title"])
+        # 5. Try to find and attach an open-access PDF
+        pdf_url = await _find_open_access_pdf(doi)
+        if pdf_url:
+            attached = await _attach_pdf_from_url(zot, key, pdf_url)
+            if attached:
+                return f"Added [{key}] {title} (with PDF)"
         return f"Added [{key}] {title}"
     elif result.get("failed"):
         return f"Rejected: {list(result['failed'].values())}"
@@ -456,6 +499,11 @@ async def add_paper_by_arxiv_id(arxiv_id: str, collection_id: str | None = None)
         created = list(result["successful"].values())[0]
         key = created.get("key", "unknown")
         title = created.get("data", {}).get("title", item["title"])
+        # 5. Attach the arXiv PDF (always freely available)
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+        attached = await _attach_pdf_from_url(zot, key, pdf_url)
+        if attached:
+            return f"Added [{key}] {title} (with PDF)"
         return f"Added [{key}] {title}"
     elif result.get("failed"):
         return f"Rejected: {list(result['failed'].values())}"
@@ -649,6 +697,71 @@ async def get_item_details(item_key: str) -> str:
 
 
 @mcp.tool()
+async def get_item_fulltext(item_key: str) -> str:
+    """Get the full text content of a paper (e.g. from an indexed PDF attachment).
+
+    Args:
+        item_key: The Zotero item key (the parent item, not the attachment)
+    """
+    zot = _get_zot()
+
+    try:
+        children = zot.children(item_key)
+    except Exception as e:
+        return f"Could not find item {item_key}: {e}"
+
+    for child in children:
+        child_data = child.get("data", {})
+        child_key = child_data.get("key", "")
+        if child_data.get("itemType") == "attachment" and child_key:
+            try:
+                ft = zot.fulltext_item(child_key)
+                content = ft.get("content", "")
+                if content:
+                    return content
+            except Exception:
+                continue
+
+    return "No full-text content available for this item."
+
+
+@mcp.tool()
+async def add_note(item_key: str, note: str) -> str:
+    """Add a note to a Zotero item.
+
+    The note is created as a child of the specified item.
+    Supports HTML formatting (e.g. <b>bold</b>, <i>italic</i>, <ul><li>lists</li></ul>).
+
+    Args:
+        item_key: The parent Zotero item key to attach the note to
+        note: The note content (plain text or HTML)
+    """
+    zot = _get_zot()
+
+    try:
+        zot.item(item_key)
+    except Exception as e:
+        return f"Could not find item {item_key}: {e}"
+
+    template = zot.item_template("note")
+    template["note"] = note
+
+    try:
+        result = zot.create_items([template], parentid=item_key)
+    except Exception as e:
+        return f"Failed to create note: {e}"
+
+    if result.get("successful"):
+        created = list(result["successful"].values())[0]
+        note_key = created.get("key", "unknown")
+        return f"Added note [{note_key}] to item {item_key}"
+    elif result.get("failed"):
+        return f"Rejected: {list(result['failed'].values())}"
+    else:
+        return f"Unexpected: {result}"
+
+
+@mcp.tool()
 async def delete_item(item_key: str) -> str:
     """Permanently delete an item from your Zotero library.
 
@@ -734,6 +847,32 @@ async def create_collection(name: str, parent_collection_id: str | None = None) 
         return f"Zotero rejected the collection: {errors}"
 
     return f"Unexpected response from Zotero: {result}"
+
+
+@mcp.tool()
+async def delete_collection(collection_id: str) -> str:
+    """Permanently delete a collection from your Zotero library.
+
+    Items in the collection are NOT deleted — they remain in your library.
+
+    Args:
+        collection_id: The collection key to delete
+    """
+    zot = _get_zot()
+
+    try:
+        col = zot.collection(collection_id)
+    except Exception as e:
+        return f"Could not find collection {collection_id}: {e}"
+
+    name = col.get("data", {}).get("name", collection_id)
+
+    try:
+        zot.delete_collection(col)
+    except Exception as e:
+        return f"Failed to delete collection: {e}"
+
+    return f"Deleted collection [{collection_id}] {name}"
 
 
 @mcp.tool()

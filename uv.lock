@@ -998,8 +998,8 @@ wheels = [
 ]
 
 [[package]]
-name = "zotero-mcp"
-version = "0.1.0"
+name = "zotero-library-mcp"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
