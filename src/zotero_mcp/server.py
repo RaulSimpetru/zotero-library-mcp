@@ -572,6 +572,35 @@ async def add_book_by_isbn(isbn: str, collection_id: str | None = None) -> str:
 
 
 @mcp.tool()
+async def get_unfiled_items(limit: int = 25) -> str:
+    """Get items that are not in any collection (unfiled items).
+
+    Args:
+        limit: Maximum number of items to return (default 25)
+    """
+    zot = _get_zot()
+
+    try:
+        all_items = zot.everything(zot.top())
+    except Exception as e:
+        return f"Could not fetch items: {e}"
+
+    unfiled = []
+    for item in all_items:
+        data = item.get("data", {})
+        if data.get("itemType") in ("attachment", "note"):
+            continue
+        if not data.get("collections"):
+            unfiled.append(data)
+
+    if not unfiled:
+        return "No unfiled items."
+
+    lines = [_fmt_item(item) for item in unfiled[:limit]]
+    return f"{len(unfiled)} unfiled items (showing {len(lines)}):\n" + "\n".join(lines)
+
+
+@mcp.tool()
 async def search_library(query: str, limit: int = 10) -> str:
     """Search your Zotero library.
 
