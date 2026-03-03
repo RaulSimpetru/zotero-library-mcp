@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.RaulSimpetru/zotero-library-mcp",
+  "description": "Add papers and books to Zotero by DOI, arXiv ID, or ISBN and manage your library",
+  "repository": {
+    "url": "https://github.com/RaulSimpetru/zotero-library-mcp",
+    "source": "github"
+  },
+  "version": "0.1.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "zotero-library-mcp",
+      "version": "0.1.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Your Zotero user or group library ID",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "ZOTERO_LIBRARY_ID"
+        },
+        {
+          "description": "Zotero API key with read/write permissions",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "ZOTERO_API_KEY"
+        }
+      ]
+    }
+  ]
+}

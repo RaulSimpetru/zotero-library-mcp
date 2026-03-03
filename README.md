@@ -108,4 +108,4 @@ ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
 
 MIT
 
-<!-- mcp-name: io.github.RaulSimpetru/zotero-library-mcp -->
+mcp-name: io.github.RaulSimpetru/zotero-library-mcp
