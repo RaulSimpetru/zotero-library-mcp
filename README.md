@@ -1,4 +1,4 @@
-# zotero-mcp
+# zotero-library-mcp
 
 An MCP server that lets AI assistants add papers and books to your Zotero library by DOI, arXiv ID, or ISBN — and manage your collections, tags, and items.
 
@@ -56,7 +56,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 claude mcp add zotero \
   -e ZOTERO_LIBRARY_ID=your_library_id \
   -e ZOTERO_API_KEY=your_api_key \
-  -- uvx --from git+https://github.com/RaulSimpetru/zotero-mcp zotero-mcp
+  -- uvx --from git+https://github.com/RaulSimpetru/zotero-library-mcp zotero-mcp
 ```
 
 ### Claude Desktop
@@ -68,7 +68,7 @@ Add this to your `claude_desktop_config.json`:
   "mcpServers": {
     "zotero": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/RaulSimpetru/zotero-mcp", "zotero-mcp"],
+      "args": ["--from", "git+https://github.com/RaulSimpetru/zotero-library-mcp", "zotero-mcp"],
       "env": {
         "ZOTERO_LIBRARY_ID": "your_library_id",
         "ZOTERO_API_KEY": "your_api_key"
@@ -82,7 +82,7 @@ Add this to your `claude_desktop_config.json`:
 
 ```bash
 ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
-  uvx --from git+https://github.com/RaulSimpetru/zotero-mcp zotero-mcp
+  uvx --from git+https://github.com/RaulSimpetru/zotero-library-mcp zotero-mcp
 ```
 
 ## Environment Variables
@@ -108,4 +108,4 @@ ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
 
 MIT
 
-<!-- mcp-name: io.github.RaulSimpetru/zotero-mcp -->
+<!-- mcp-name: io.github.RaulSimpetru/zotero-library-mcp -->
