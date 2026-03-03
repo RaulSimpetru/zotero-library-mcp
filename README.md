@@ -67,7 +67,7 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "zotero": {
-      "command": "uvx",
+      "command": "/full/path/to/uvx",
       "args": ["--from", "git+https://github.com/RaulSimpetru/zotero-library-mcp", "zotero-mcp"],
       "env": {
         "ZOTERO_LIBRARY_ID": "your_library_id",
@@ -77,6 +77,8 @@ Add this to your `claude_desktop_config.json`:
   }
 }
 ```
+
+> **Note:** Claude Desktop doesn't inherit your shell's PATH, so you need the full path to `uvx`. Find it with `which uvx` in your terminal.
 
 ### Run standalone
 
