@@ -858,15 +858,18 @@ async def get_item_details(item_key: str) -> str:
 async def get_bibtex(
     item_keys: list[str] | None = None,
     collection_id: str | None = None,
+    save_path: str | None = None,
 ) -> str:
     """Export BibTeX entries from your Zotero library.
 
     Can export specific items, an entire collection, or your whole library.
-    Returns a combined .bib file ready for use with LaTeX/Overleaf.
+    Use save_path to write directly to a .bib file instead of returning the
+    full content (recommended for large exports to save tokens).
 
     Args:
         item_keys: Optional list of item keys to export. If omitted, exports collection or full library.
         collection_id: Optional collection key to export all items from.
+        save_path: Optional file path to save the .bib output to (e.g. "/path/to/refs.bib").
     """
     zot = _get_zot()
 
@@ -879,17 +882,27 @@ async def get_bibtex(
                     parts.append(result.strip())
             if not parts:
                 return "No BibTeX data available for the specified items."
-            return "\n\n".join(parts)
+            bib = "\n\n".join(parts)
         elif collection_id:
-            result = zot.collection_items(collection_id, format="bibtex")
+            bib = zot.collection_items(collection_id, format="bibtex")
         else:
-            result = zot.items(format="bibtex")
+            bib = zot.items(format="bibtex")
     except Exception as e:
         return f"Could not export BibTeX: {e}"
 
-    if not result:
+    if not bib:
         return "No BibTeX data available."
-    return result
+
+    if save_path:
+        try:
+            with open(os.path.expanduser(save_path), "w", encoding="utf-8") as f:
+                f.write(bib)
+            n_entries = bib.count("@")
+            return f"Saved {n_entries} BibTeX entries to {save_path}"
+        except Exception as e:
+            return f"Failed to save file: {e}"
+
+    return bib
 
 
 @mcp.tool()
