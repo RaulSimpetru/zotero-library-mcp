@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zotero-library-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "MCP server for adding papers and books to Zotero by DOI, arXiv ID, or ISBN"
 readme = "README.md"
 license = "MIT"

@@ -1056,27 +1056,51 @@ async def create_annotation(
         found_rects = []
         found_page = None
 
-        # Build search variants: exact, normalized whitespace, normalized quotes
-        variants = [quoted_text]
-        normalized = re.sub(r"\s+", " ", quoted_text.strip())
-        if normalized != quoted_text:
-            variants.append(normalized)
-        # Normalize straight quotes to curly and vice versa
-        quote_normalized = quoted_text.replace('"', '\u201c').replace('"', '\u201d')
-        quote_normalized2 = quoted_text.replace('\u201c', '"').replace('\u201d', '"')
-        for v in (quote_normalized, quote_normalized2):
-            if v not in variants:
-                variants.append(v)
+        def _normalize_text(t: str) -> str:
+            """Normalize ligatures, quotes, and whitespace for matching."""
+            t = t.replace("\ufb01", "fi").replace("\ufb02", "fl")
+            t = t.replace("\ufb00", "ff").replace("\ufb03", "ffi").replace("\ufb04", "ffl")
+            t = t.replace("\u201c", '"').replace("\u201d", '"')
+            t = t.replace("\u2018", "'").replace("\u2019", "'")
+            t = t.replace("\u2013", "-").replace("\u2014", "-")
+            return re.sub(r"\s+", " ", t.strip())
 
-        for variant in variants:
+        search_norm = _normalize_text(quoted_text).lower()
+
+        # Strategy 1: try PyMuPDF's built-in search (handles simple cases)
+        for page in doc:
+            rects = page.search_for(quoted_text)
+            if rects:
+                found_rects = rects
+                found_page = page
+                break
+
+        # Strategy 2: word-based search with ligature/whitespace normalization
+        # Handles line breaks, ligatures, and column layouts
+        if not found_rects:
             for page in doc:
-                rects = page.search_for(variant)
-                if rects:
-                    found_rects = rects
+                words = page.get_text("words")
+                if not words:
+                    continue
+                # Build normalized text from words, tracking positions
+                word_texts = [_normalize_text(w[4]) for w in words]
+                full_text = " ".join(word_texts).lower()
+                pos = full_text.find(search_norm)
+                if pos < 0:
+                    continue
+                # Map character position back to word indices
+                char_count = 0
+                match_rects = []
+                for i, w in enumerate(words):
+                    word_start = char_count
+                    word_end = char_count + len(word_texts[i])
+                    if word_end > pos and word_start < pos + len(search_norm):
+                        match_rects.append(fitz.Rect(w[0], w[1], w[2], w[3]))
+                    char_count = word_end + 1  # +1 for space
+                if match_rects:
+                    found_rects = match_rects
                     found_page = page
                     break
-            if found_rects:
-                break
 
         if not found_rects or found_page is None:
             doc.close()
