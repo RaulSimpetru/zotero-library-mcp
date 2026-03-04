@@ -10,7 +10,10 @@ import zipfile
 from urllib.parse import quote, urlparse
 from typing import Any
 
+import json
+
 import bibtexparser
+import fitz
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pyzotero import zotero
@@ -309,6 +312,50 @@ async def _attach_pdf_from_url(zot: zotero.Zotero, parent_key: str, url: str) ->
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+async def _download_pdf(zot: zotero.Zotero, item_key: str) -> tuple[str, str]:
+    """Download the PDF attachment for an item to a temp file.
+
+    Returns (tmp_path, attachment_key). Caller must delete tmp_path.
+    Raises ValueError if no PDF attachment found.
+    """
+    children = zot.children(item_key)
+    att_key = None
+    for child in children:
+        d = child.get("data", {})
+        if d.get("itemType") == "attachment" and d.get("contentType") == "application/pdf":
+            att_key = d.get("key")
+            break
+    if not att_key:
+        raise ValueError(f"No PDF attachment found for item {item_key}")
+
+    if _use_webdav():
+        # Download the zip from WebDAV and extract the PDF
+        auth = (ZOTERO_WEBDAV_USER, ZOTERO_WEBDAV_PASSWORD)
+        async with httpx.AsyncClient(timeout=60, auth=auth) as client:
+            resp = await client.get(f"{ZOTERO_WEBDAV_URL}/{att_key}.zip")
+            resp.raise_for_status()
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(resp.content)
+            zip_path = tmp.name
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                pdf_names = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
+                if not pdf_names:
+                    raise ValueError("No PDF found in WebDAV zip")
+                pdf_data = zf.read(pdf_names[0])
+        finally:
+            os.unlink(zip_path)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_data)
+            return tmp.name, att_key
+    else:
+        # Download via Zotero storage
+        file_data = zot.file(att_key)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_data)
+            return tmp.name, att_key
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +1022,161 @@ async def add_note(item_key: str, note: str) -> str:
         return f"Rejected: {list(result['failed'].values())}"
     else:
         return f"Unexpected: {result}"
+
+
+@mcp.tool()
+async def create_annotation(
+    item_key: str,
+    quoted_text: str,
+    comment: str = "",
+    color: str = "#ffd400",
+) -> str:
+    """Highlight a text passage in a PDF attached to a Zotero item.
+
+    Searches the PDF for the exact quoted text and creates a visible
+    highlight annotation in Zotero's PDF reader. Use this to mark the
+    source of a citation so the user can verify it.
+
+    Args:
+        item_key: The Zotero item key (the parent item, not the attachment)
+        quoted_text: The exact text passage to highlight in the PDF
+        comment: Optional comment to attach to the highlight
+        color: Highlight color as hex (default "#ffd400" yellow)
+    """
+    zot = _get_zot()
+    tmp_path = None
+
+    try:
+        tmp_path, att_key = await _download_pdf(zot, item_key)
+    except Exception as e:
+        return f"Could not download PDF: {e}"
+
+    try:
+        doc = fitz.open(tmp_path)
+        found_rects = []
+        found_page = None
+
+        # Build search variants: exact, normalized whitespace, normalized quotes
+        variants = [quoted_text]
+        normalized = re.sub(r"\s+", " ", quoted_text.strip())
+        if normalized != quoted_text:
+            variants.append(normalized)
+        # Normalize straight quotes to curly and vice versa
+        quote_normalized = quoted_text.replace('"', '\u201c').replace('"', '\u201d')
+        quote_normalized2 = quoted_text.replace('\u201c', '"').replace('\u201d', '"')
+        for v in (quote_normalized, quote_normalized2):
+            if v not in variants:
+                variants.append(v)
+
+        for variant in variants:
+            for page in doc:
+                rects = page.search_for(variant)
+                if rects:
+                    found_rects = rects
+                    found_page = page
+                    break
+            if found_rects:
+                break
+
+        if not found_rects or found_page is None:
+            doc.close()
+            return f"Text not found in PDF: \"{quoted_text[:80]}...\""
+
+        page_index = found_page.number
+        page_label = str(page_index + 1)
+        # PyMuPDF uses top-left origin; Zotero uses bottom-left (standard PDF)
+        page_height = found_page.rect.height
+        rects_list = [[r.x0, page_height - r.y1, r.x1, page_height - r.y0] for r in found_rects]
+
+        # Build sortIndex: pageIndex(5)|charOffset(6)|y-position(5)
+        y_pos = int(found_rects[0].y0)
+        sort_index = f"{page_index:05d}|000000|{y_pos:05d}"
+
+        doc.close()
+
+        # Create the annotation via Zotero API
+        annotation = {
+            "itemType": "annotation",
+            "parentItem": att_key,
+            "annotationType": "highlight",
+            "annotationText": quoted_text,
+            "annotationComment": comment,
+            "annotationColor": color,
+            "annotationPageLabel": page_label,
+            "annotationSortIndex": sort_index,
+            "annotationPosition": json.dumps({
+                "pageIndex": page_index,
+                "rects": rects_list,
+            }),
+            "tags": [],
+        }
+
+        result = zot.create_items([annotation], parentid=att_key)
+
+        if result.get("successful"):
+            created = list(result["successful"].values())[0]
+            ann_key = created.get("key", "unknown")
+            return f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
+        elif result.get("failed"):
+            return f"Rejected: {list(result['failed'].values())}"
+        else:
+            return f"Unexpected: {result}"
+
+    except Exception as e:
+        return f"Failed to create annotation: {e}"
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@mcp.tool()
+async def get_annotations(item_key: str) -> str:
+    """List all highlights and annotations on a paper's PDF.
+
+    Args:
+        item_key: The Zotero item key (the parent item, not the attachment)
+    """
+    zot = _get_zot()
+
+    # Find PDF attachment(s), then get their annotation children
+    try:
+        children = zot.children(item_key)
+    except Exception as e:
+        return f"Could not find item {item_key}: {e}"
+
+    annotations = []
+    for child in children:
+        cd = child.get("data", {})
+        if cd.get("itemType") == "attachment" and cd.get("contentType") == "application/pdf":
+            att_key = cd.get("key", "")
+            if not att_key:
+                continue
+            try:
+                att_children = zot.children(att_key)
+            except Exception:
+                continue
+            for ann in att_children:
+                d = ann.get("data", {})
+                if d.get("itemType") != "annotation":
+                    continue
+                ann_type = d.get("annotationType", "?")
+                text = d.get("annotationText", "")
+                comment = d.get("annotationComment", "")
+                color = d.get("annotationColor", "")
+                page = d.get("annotationPageLabel", "?")
+                key = d.get("key", "?")
+
+                line = f"[{key}] p.{page} ({ann_type}, {color})"
+                if text:
+                    line += f": \"{text[:100]}\""
+                if comment:
+                    line += f" — {comment}"
+                annotations.append(line)
+
+    if not annotations:
+        return "No annotations found for this item."
+
+    return f"{len(annotations)} annotations:\n" + "\n".join(annotations)
 
 
 @mcp.tool()
