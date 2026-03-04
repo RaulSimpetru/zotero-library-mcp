@@ -4,15 +4,31 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zotero-library-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP server for adding papers and books to Zotero by DOI, arXiv ID, or ISBN"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Raul C. Sîmpetru", email = "raul.simpetru@fau.de" },
+]
+keywords = ["zotero", "mcp", "doi", "arxiv", "isbn", "reference-manager"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pyzotero>=1.5.0",
     "httpx>=0.27.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/RaulSimpetru/zotero-library-mcp"
+Repository = "https://github.com/RaulSimpetru/zotero-library-mcp"
+Issues = "https://github.com/RaulSimpetru/zotero-library-mcp/issues"
 
 [project.scripts]
 zotero-mcp = "zotero_mcp.server:main"
