@@ -24,7 +24,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 ### Reading & annotating
 
 - **`get_item_fulltext`** — Get the full text of an indexed PDF
-- **`get_bibtex`** — Export BibTeX for items, a collection, or your full library
+- **`get_bibtex`** — Export BibTeX for one or more items, a collection, or your full library (with optional `save_path` to write a `.bib` file directly)
 - **`add_note`** — Add a note to an item
 
 ### File attachments
