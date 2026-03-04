@@ -10,6 +10,7 @@ import zipfile
 from urllib.parse import quote, urlparse
 from typing import Any
 
+import bibtexparser
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pyzotero import zotero
@@ -873,24 +874,30 @@ async def get_bibtex(
     """
     zot = _get_zot()
 
+    def _bib_to_str(result: object) -> str:
+        """Convert a pyzotero bibtex result (BibDatabase) to a string."""
+        if isinstance(result, bibtexparser.bibdatabase.BibDatabase):
+            return bibtexparser.dumps(result)
+        return str(result)
+
     try:
         if item_keys:
             parts = []
             for key in item_keys:
                 result = zot.item(key, format="bibtex")
                 if result:
-                    parts.append(result.strip())
+                    parts.append(_bib_to_str(result).strip())
             if not parts:
                 return "No BibTeX data available for the specified items."
             bib = "\n\n".join(parts)
         elif collection_id:
-            bib = zot.collection_items(collection_id, format="bibtex")
+            bib = _bib_to_str(zot.collection_items(collection_id, format="bibtex"))
         else:
-            bib = zot.items(format="bibtex")
+            bib = _bib_to_str(zot.items(format="bibtex"))
     except Exception as e:
         return f"Could not export BibTeX: {e}"
 
-    if not bib:
+    if not bib.strip():
         return "No BibTeX data available."
 
     if save_path:
