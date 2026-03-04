@@ -19,6 +19,16 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 - **`search_library`** — Search your Zotero library by title, author, tag, etc.
 - **`get_item_details`** — View full metadata for any item
 - **`get_recent_items`** — List recently added items
+- **`get_unfiled_items`** — Get items not in any collection
+
+### Reading & annotating
+
+- **`get_item_fulltext`** — Get the full text of an indexed PDF
+- **`add_note`** — Add a note to an item
+
+### File attachments
+
+- **`attach_file`** — Attach a local file to an item
 
 ### Collections
 
@@ -40,6 +50,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 ### Deleting
 
 - **`delete_item`** — Permanently delete an item from your library
+- **`delete_collection`** — Permanently delete a collection
 
 ## Prerequisites
 
@@ -59,6 +70,20 @@ claude mcp add zotero \
   -- uvx --from git+https://github.com/RaulSimpetru/zotero-library-mcp zotero-mcp
 ```
 
+#### WebDAV setup
+
+To use WebDAV file storage (e.g. Synology, Nextcloud), include the WebDAV variables:
+
+```bash
+claude mcp add zotero \
+  -e ZOTERO_LIBRARY_ID=your_library_id \
+  -e ZOTERO_API_KEY=your_api_key \
+  -e ZOTERO_WEBDAV_URL=https://your-webdav-server.com \
+  -e ZOTERO_WEBDAV_USER=your_username \
+  -e ZOTERO_WEBDAV_PASSWORD=your_password \
+  -- uvx --from git+https://github.com/RaulSimpetru/zotero-library-mcp zotero-mcp
+```
+
 ### Claude Desktop
 
 Add this to your `claude_desktop_config.json`:
@@ -71,7 +96,10 @@ Add this to your `claude_desktop_config.json`:
       "args": ["--from", "git+https://github.com/RaulSimpetru/zotero-library-mcp", "zotero-mcp"],
       "env": {
         "ZOTERO_LIBRARY_ID": "your_library_id",
-        "ZOTERO_API_KEY": "your_api_key"
+        "ZOTERO_API_KEY": "your_api_key",
+        "ZOTERO_WEBDAV_URL": "https://your-webdav-server.com",
+        "ZOTERO_WEBDAV_USER": "your_username",
+        "ZOTERO_WEBDAV_PASSWORD": "your_password"
       }
     }
   }
@@ -95,6 +123,11 @@ ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
 | `ZOTERO_API_KEY` | Yes | API key with read/write permissions |
 | `ZOTERO_LIBRARY_TYPE` | No | `user` (default) or `group` |
 | `CROSSREF_MAILTO` | No | Your email for CrossRef polite pool (faster API access) |
+| `ZOTERO_WEBDAV_URL` | No | WebDAV URL for file storage (e.g. `https://dav.example.com`) |
+| `ZOTERO_WEBDAV_USER` | No | WebDAV username |
+| `ZOTERO_WEBDAV_PASSWORD` | No | WebDAV password |
+
+> **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, file attachments are uploaded to your WebDAV server instead of Zotero's built-in storage. The server automatically appends `/zotero` to the base URL, matching Zotero Desktop's behavior.
 
 ## How it works
 

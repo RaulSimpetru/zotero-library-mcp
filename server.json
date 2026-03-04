@@ -6,12 +6,12 @@
     "url": "https://github.com/RaulSimpetru/zotero-library-mcp",
     "source": "github"
   },
-  "version": "0.2.2",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "zotero-library-mcp",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       },
@@ -20,7 +20,7 @@
           "description": "Your Zotero user or group library ID",
           "isRequired": true,
           "format": "string",
-          "isSecret": false,
+          "isSecret": true,
           "name": "ZOTERO_LIBRARY_ID"
         },
         {
@@ -29,6 +29,27 @@
           "format": "string",
           "isSecret": true,
           "name": "ZOTERO_API_KEY"
+        },
+        {
+          "description": "WebDAV URL for file storage (if using WebDAV sync)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ZOTERO_WEBDAV_URL"
+        },
+        {
+          "description": "WebDAV username",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ZOTERO_WEBDAV_USER"
+        },
+        {
+          "description": "WebDAV password",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ZOTERO_WEBDAV_PASSWORD"
         }
       ]
     }

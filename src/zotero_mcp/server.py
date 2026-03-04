@@ -1,9 +1,13 @@
 """Zotero MCP Server — Add papers by DOI and manage your Zotero library."""
 
+import hashlib
+import ipaddress
 import os
 import re
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
+from urllib.parse import quote, urlparse
 from typing import Any
 
 import httpx
@@ -19,6 +23,34 @@ ZOTERO_LIBRARY_TYPE = os.environ.get("ZOTERO_LIBRARY_TYPE", "user")
 
 CROSSREF_API = "https://api.crossref.org/works"
 CROSSREF_MAILTO = os.environ.get("CROSSREF_MAILTO", "")  # optional, for polite pool
+
+# WebDAV config (optional — if set, file attachments go to WebDAV instead of Zotero storage)
+# Zotero Desktop auto-appends /zotero/ to the base URL; we do the same
+_raw_webdav_url = os.environ.get("ZOTERO_WEBDAV_URL", "").rstrip("/")
+ZOTERO_WEBDAV_URL = f"{_raw_webdav_url}/zotero" if _raw_webdav_url else ""
+ZOTERO_WEBDAV_USER = os.environ.get("ZOTERO_WEBDAV_USER", "")
+ZOTERO_WEBDAV_PASSWORD = os.environ.get("ZOTERO_WEBDAV_PASSWORD", "")
+
+MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB limit for PDF downloads
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check that a URL is safe to fetch (no SSRF to internal networks)."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = p.hostname or ""
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_global
+    except ValueError:
+        # It's a hostname — block obviously internal ones
+        if host in ("localhost", "") or host.endswith(".local"):
+            return False
+    return True
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -137,10 +169,11 @@ async def _resolve_doi(doi: str) -> dict[str, Any]:
     """Fetch metadata for a DOI from the CrossRef API."""
     headers = {"Accept": "application/json"}
     if CROSSREF_MAILTO:
-        headers["User-Agent"] = f"ZoteroMCP/0.1 (mailto:{CROSSREF_MAILTO})"
+        mailto = CROSSREF_MAILTO.replace("\r", "").replace("\n", "")
+        headers["User-Agent"] = f"ZoteroMCP/0.1 (mailto:{mailto})"
 
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{CROSSREF_API}/{doi}", headers=headers)
+        resp = await client.get(f"{CROSSREF_API}/{quote(doi, safe='')}", headers=headers)
         resp.raise_for_status()
         return resp.json()
 
@@ -162,23 +195,119 @@ async def _find_open_access_pdf(doi: str) -> str | None:
         return None
 
 
-async def _attach_pdf_from_url(zot: zotero.Zotero, parent_key: str, url: str) -> str | None:
-    """Download a PDF from a URL and attach it to a Zotero item. Returns attachment key or None."""
+def _use_webdav() -> bool:
+    """Check if WebDAV is configured for file storage."""
+    return bool(ZOTERO_WEBDAV_URL and ZOTERO_WEBDAV_USER and ZOTERO_WEBDAV_PASSWORD)
+
+
+async def _attach_file_webdav(zot: zotero.Zotero, parent_key: str, file_path: str) -> str | None:
+    """Create an attachment item and upload the file to WebDAV. Returns attachment key or None."""
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "")
-            if "pdf" not in content_type and not resp.content[:5] == b"%PDF-":
-                return None
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-                f.write(resp.content)
-                tmp_path = f.name
-        zot.attachment_simple([tmp_path], parent_key)
-        os.unlink(tmp_path)
+        # 1. Create the attachment item (metadata only)
+        template = zot.item_template("attachment", "imported_file")
+        template["title"] = os.path.basename(file_path)
+        template["filename"] = os.path.basename(file_path)
+        template["contentType"] = "application/pdf"
+        result = zot.create_items([template], parentid=parent_key)
+        if not result.get("successful"):
+            return None
+        created = list(result["successful"].values())[0]
+        att_key = created["key"]
+
+        # 2. Compute MD5 and mtime
+        file_data = open(file_path, "rb").read()
+        md5 = hashlib.md5(file_data).hexdigest()
+        mtime = int(os.path.getmtime(file_path) * 1000)
+
+        # 3. Create zip
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            zip_path = tmp.name
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(file_path, os.path.basename(file_path))
+            with open(zip_path, "rb") as f:
+                zip_data = f.read()
+        finally:
+            os.unlink(zip_path)
+
+        # 4. Build prop XML
+        prop_xml = (
+            f'<properties version="1">'
+            f'<mtime>{mtime}</mtime>'
+            f'<hash>{md5}</hash>'
+            f'</properties>'
+        )
+
+        # 5. Upload zip and prop to WebDAV
+        auth = (ZOTERO_WEBDAV_USER, ZOTERO_WEBDAV_PASSWORD)
+        async with httpx.AsyncClient(timeout=60, auth=auth) as client:
+            r1 = await client.put(
+                f"{ZOTERO_WEBDAV_URL}/{att_key}.zip",
+                content=zip_data,
+                headers={"Content-Type": "application/zip"},
+            )
+            r1.raise_for_status()
+            r2 = await client.put(
+                f"{ZOTERO_WEBDAV_URL}/{att_key}.prop",
+                content=prop_xml.encode(),
+                headers={"Content-Type": "text/xml"},
+            )
+            r2.raise_for_status()
+
+        # 6. Update md5/mtime on the Zotero item
+        att_item = zot.item(att_key)
+        att_data = att_item["data"]
+        att_data["md5"] = md5
+        att_data["mtime"] = mtime
+        zot.update_item(att_data)
+
+        return att_key
+    except Exception:
+        return None
+
+
+async def _attach_file_local(zot: zotero.Zotero, parent_key: str, file_path: str) -> str | None:
+    """Attach a file using Zotero's built-in file storage. Returns parent key or None."""
+    try:
+        zot.attachment_simple([file_path], parent_key)
         return parent_key
     except Exception:
         return None
+
+
+async def _attach_pdf_from_url(zot: zotero.Zotero, parent_key: str, url: str) -> str | None:
+    """Download a PDF from a URL and attach it to a Zotero item. Returns attachment key or None."""
+    if not _is_safe_url(url):
+        return None
+    tmp_path = None
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+                    tmp_path = f.name
+                    size = 0
+                    async for chunk in resp.aiter_bytes(8192):
+                        size += len(chunk)
+                        if size > MAX_PDF_BYTES:
+                            return None
+                        f.write(chunk)
+                # Verify it's actually a PDF
+                with open(tmp_path, "rb") as f:
+                    header = f.read(5)
+                if "pdf" not in content_type and header != b"%PDF-":
+                    return None
+        if _use_webdav():
+            result = await _attach_file_webdav(zot, parent_key, tmp_path)
+        else:
+            result = await _attach_file_local(zot, parent_key, tmp_path)
+        return result
+    except Exception:
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +377,7 @@ OPENLIBRARY_API = "https://openlibrary.org"
 async def _resolve_isbn(isbn: str) -> dict[str, Any]:
     """Fetch book metadata from Open Library by ISBN."""
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(f"{OPENLIBRARY_ISBN_API}/{isbn}.json")
+        resp = await client.get(f"{OPENLIBRARY_ISBN_API}/{quote(isbn, safe='')}.json")
         resp.raise_for_status()
         data = resp.json()
 
@@ -256,7 +385,7 @@ async def _resolve_isbn(isbn: str) -> dict[str, Any]:
         authors = []
         for author_ref in data.get("authors", []):
             key = author_ref.get("key", "")
-            if key:
+            if key and re.fullmatch(r"/authors/OL\d+A", key):
                 try:
                     author_resp = await client.get(f"{OPENLIBRARY_API}{key}.json")
                     author_resp.raise_for_status()
@@ -788,6 +917,39 @@ async def add_note(item_key: str, note: str) -> str:
         return f"Rejected: {list(result['failed'].values())}"
     else:
         return f"Unexpected: {result}"
+
+
+@mcp.tool()
+async def attach_file(item_key: str, file_path: str) -> str:
+    """Attach a local file (e.g. PDF) to an existing Zotero item.
+
+    Args:
+        item_key: The Zotero item key to attach the file to
+        file_path: Absolute path to the file on your local machine
+    """
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}"
+
+    zot = _get_zot()
+
+    try:
+        zot.item(item_key)
+    except Exception as e:
+        return f"Could not find item {item_key}: {e}"
+
+    filename = os.path.basename(file_path)
+
+    if _use_webdav():
+        result = await _attach_file_webdav(zot, item_key, file_path)
+        if result:
+            return f"Attached '{filename}' to item {item_key} (via WebDAV)"
+        return f"Failed to attach file via WebDAV"
+    else:
+        try:
+            zot.attachment_simple([file_path], item_key)
+        except Exception as e:
+            return f"Failed to attach file: {e}"
+        return f"Attached '{filename}' to item {item_key}"
 
 
 @mcp.tool()
