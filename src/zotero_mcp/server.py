@@ -855,6 +855,44 @@ async def get_item_details(item_key: str) -> str:
 
 
 @mcp.tool()
+async def get_bibtex(
+    item_keys: list[str] | None = None,
+    collection_id: str | None = None,
+) -> str:
+    """Export BibTeX entries from your Zotero library.
+
+    Can export specific items, an entire collection, or your whole library.
+    Returns a combined .bib file ready for use with LaTeX/Overleaf.
+
+    Args:
+        item_keys: Optional list of item keys to export. If omitted, exports collection or full library.
+        collection_id: Optional collection key to export all items from.
+    """
+    zot = _get_zot()
+
+    try:
+        if item_keys:
+            parts = []
+            for key in item_keys:
+                result = zot.item(key, format="bibtex")
+                if result:
+                    parts.append(result.strip())
+            if not parts:
+                return "No BibTeX data available for the specified items."
+            return "\n\n".join(parts)
+        elif collection_id:
+            result = zot.collection_items(collection_id, format="bibtex")
+        else:
+            result = zot.items(format="bibtex")
+    except Exception as e:
+        return f"Could not export BibTeX: {e}"
+
+    if not result:
+        return "No BibTeX data available."
+    return result
+
+
+@mcp.tool()
 async def get_item_fulltext(item_key: str) -> str:
     """Get the full text content of a paper (e.g. from an indexed PDF attachment).
 
