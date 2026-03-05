@@ -1237,6 +1237,44 @@ async def attach_file(item_key: str, file_path: str) -> str:
 
 
 @mcp.tool()
+async def download_pdf(item_key: str, save_path: str) -> str:
+    """Download the PDF attachment of a Zotero item to a local file.
+
+    Useful when Zotero's fulltext index is incomplete (e.g. for books)
+    and you need to read the PDF directly with other tools.
+
+    Args:
+        item_key: The Zotero item key (the parent item, not the attachment)
+        save_path: Local file path to save the PDF to (e.g. "/tmp/paper.pdf")
+    """
+    zot = _get_zot()
+
+    try:
+        tmp_path, att_key = await _download_pdf(zot, item_key)
+    except Exception as e:
+        return f"Could not download PDF: {e}"
+
+    try:
+        dest = os.path.expanduser(save_path)
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        os.rename(tmp_path, dest)
+        size_mb = os.path.getsize(dest) / (1024 * 1024)
+        return f"Saved PDF to {dest} ({size_mb:.1f} MB)"
+    except OSError:
+        # rename fails across filesystems, fall back to copy
+        import shutil
+        try:
+            shutil.move(tmp_path, dest)
+            size_mb = os.path.getsize(dest) / (1024 * 1024)
+            return f"Saved PDF to {dest} ({size_mb:.1f} MB)"
+        except Exception as e:
+            return f"Failed to save PDF: {e}"
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+
+@mcp.tool()
 async def delete_item(item_key: str) -> str:
     """Permanently delete an item from your Zotero library.
 

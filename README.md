@@ -32,6 +32,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 ### File attachments
 
 - **`attach_file`** — Attach a local file to an item
+- **`download_pdf`** — Download a PDF attachment to a local file (useful when Zotero's fulltext index is incomplete)
 
 ### Collections
 
