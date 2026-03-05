@@ -1140,7 +1140,30 @@ async def create_annotation(
         if result.get("successful"):
             created = list(result["successful"].values())[0]
             ann_key = created.get("key", "unknown")
-            return f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
+
+            # Render a preview image showing the highlight on the page
+            preview_path = ""
+            try:
+                preview_doc = fitz.open(tmp_path)
+                preview_page = preview_doc[page_index]
+                # Draw semi-transparent highlight rectangles
+                for r in found_rects:
+                    highlight = preview_page.add_highlight_annot(r)
+                    highlight.set_colors(stroke=fitz.utils.getColor("yellow"))
+                    highlight.update()
+                # Render at 2x resolution for clarity
+                pix = preview_page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                preview_path = tempfile.mktemp(suffix=".png", prefix="zotero_annot_")
+                pix.save(preview_path)
+                preview_doc.close()
+            except Exception:
+                preview_path = ""
+
+            msg = f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
+            if preview_path:
+                msg += f"\n\nPreview image saved to: {preview_path}"
+                msg += "\nOpen or read this image to visually verify the highlight placement."
+            return msg
         elif result.get("failed"):
             return f"Rejected: {list(result['failed'].values())}"
         else:
