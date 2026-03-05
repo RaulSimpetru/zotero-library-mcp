@@ -1071,7 +1071,16 @@ async def create_annotation(
         for page in doc:
             rects = page.search_for(quoted_text)
             if rects:
-                found_rects = rects
+                # search_for returns rects for ALL occurrences on the page.
+                # Keep only the first match by grouping rects that are
+                # vertically close (within 20pt = same or adjacent line).
+                first_match = [rects[0]]
+                for r in rects[1:]:
+                    if abs(r.y0 - first_match[-1].y0) < 20:
+                        first_match.append(r)
+                    else:
+                        break
+                found_rects = first_match
                 found_page = page
                 break
 
@@ -1108,9 +1117,20 @@ async def create_annotation(
 
         page_index = found_page.number
         page_label = str(page_index + 1)
-        # PyMuPDF uses top-left origin; Zotero uses bottom-left (standard PDF)
-        page_height = found_page.rect.height
-        rects_list = [[r.x0, page_height - r.y1, r.x1, page_height - r.y0] for r in found_rects]
+        # PyMuPDF returns coords in a normalized space (CropBox shifted to origin,
+        # top-left Y). Zotero expects raw PDF coordinates (MediaBox space,
+        # bottom-left Y). page.transformation_matrix maps PDF→PyMuPDF, so we
+        # need its inverse (~) to go PyMuPDF→PDF.
+        itm = ~found_page.transformation_matrix
+        rects_list = [
+            [
+                itm.a * r.x0 + itm.e,  # pdf_x0
+                itm.d * r.y1 + itm.f,  # pdf_y0 (bottom in PDF = y1 in PyMuPDF)
+                itm.a * r.x1 + itm.e,  # pdf_x1
+                itm.d * r.y0 + itm.f,  # pdf_y1 (top in PDF = y0 in PyMuPDF)
+            ]
+            for r in found_rects
+        ]
 
         # Build sortIndex: pageIndex(5)|charOffset(6)|y-position(5)
         y_pos = int(found_rects[0].y0)
