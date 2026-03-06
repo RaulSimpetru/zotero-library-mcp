@@ -1522,6 +1522,50 @@ async def get_collection_items(collection_id: str, limit: int = 25) -> str:
 
 
 @mcp.tool()
+async def list_tags(limit: int = 100) -> str:
+    """List all tags in your Zotero library.
+
+    Args:
+        limit: Maximum number of tags to return (default 100)
+    """
+    zot = _get_zot()
+
+    try:
+        all_tags = zot.everything(zot.tags())
+    except Exception as e:
+        return f"Could not fetch tags: {e}"
+
+    if not all_tags:
+        return "No tags in library."
+
+    # pyzotero returns tags as plain strings
+    sorted_tags = sorted(all_tags, key=lambda t: t.lower())
+
+    if limit and len(sorted_tags) > limit:
+        sorted_tags = sorted_tags[:limit]
+
+    return f"Tags ({len(sorted_tags)}):\n" + "\n".join(sorted_tags)
+
+
+@mcp.tool()
+async def delete_tags(tags: list[str]) -> str:
+    """Delete tags from the entire Zotero library. This removes the tags from all items.
+
+    Args:
+        tags: List of tag names to delete from the library
+    """
+    zot = _get_zot()
+
+    try:
+        # pyzotero's delete_tags removes tags library-wide
+        zot.delete_tags(*tags)
+    except Exception as e:
+        return f"Failed to delete tags: {e}"
+
+    return f"Deleted {len(tags)} tag(s) from library: {', '.join(tags)}"
+
+
+@mcp.tool()
 async def add_tags(item_key: str, tags: list[str]) -> str:
     """Add one or more tags to a Zotero item.
 

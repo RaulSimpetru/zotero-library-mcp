@@ -44,8 +44,10 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 
 ### Tags
 
+- **`list_tags`** — List all tags in your library (with item counts)
 - **`add_tags`** — Add one or more tags to an item
 - **`remove_tags`** — Remove tags from an item
+- **`delete_tags`** — Delete tags from the entire library
 
 ### Verification
 
