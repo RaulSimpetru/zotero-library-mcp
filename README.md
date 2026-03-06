@@ -26,7 +26,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 - **`get_item_fulltext`** — Get the full text of an indexed PDF
 - **`get_bibtex`** — Export BibTeX for one or more items, a collection, or your full library (with optional `save_path` to write a `.bib` file directly)
 - **`get_annotations`** — List all highlights and annotations on a paper's PDF
-- **`create_annotation`** — Highlight a text passage in a PDF (searches for the exact text, creates a visible highlight in Zotero's reader, and returns a preview image for verification)
+- **`create_annotation`** — Highlight a text passage in a PDF (searches for the exact text, creates a visible highlight in Zotero's reader, and returns a preview image for verification). Smart overlap handling: exact duplicates update the existing comment; sub-passages get a contrasting highlight color automatically.
 - **`add_note`** — Add a note to an item
 
 ### File attachments

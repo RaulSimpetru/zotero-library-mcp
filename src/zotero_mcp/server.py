@@ -1024,18 +1024,40 @@ async def add_note(item_key: str, note: str) -> str:
         return f"Unexpected: {result}"
 
 
+HIGHLIGHT_COLORS = ["#ffd400", "#ff6666", "#5fb236", "#2ea8e5", "#a28ae5"]
+
+DEFAULT_HIGHLIGHT_COLOR = "#ffd400"
+
+
+def _normalize_text(t: str) -> str:
+    """Normalize ligatures, quotes, and whitespace for matching."""
+    t = t.replace("\ufb01", "fi").replace("\ufb02", "fl")
+    t = t.replace("\ufb00", "ff").replace("\ufb03", "ffi").replace("\ufb04", "ffl")
+    t = t.replace("\u201c", '"').replace("\u201d", '"')
+    t = t.replace("\u2018", "'").replace("\u2019", "'")
+    t = t.replace("\u2013", "-").replace("\u2014", "-")
+    return re.sub(r"\s+", " ", t.strip())
+
+
 @mcp.tool()
 async def create_annotation(
     item_key: str,
     quoted_text: str,
     comment: str = "",
-    color: str = "#ffd400",
+    color: str = DEFAULT_HIGHLIGHT_COLOR,
 ) -> str:
     """Highlight a text passage in a PDF attached to a Zotero item.
 
     Searches the PDF for the exact quoted text and creates a visible
     highlight annotation in Zotero's PDF reader. Use this to mark the
     source of a citation so the user can verify it.
+
+    Smart overlap handling:
+    - If the same text is already highlighted, appends the new comment
+      to the existing annotation instead of creating a duplicate.
+    - If the new text is a sub-passage of an existing highlight (or vice
+      versa), the new highlight is created in a contrasting color so both
+      are visually distinct.
 
     Args:
         item_key: The Zotero item key (the parent item, not the attachment)
@@ -1052,18 +1074,59 @@ async def create_annotation(
         return f"Could not download PDF: {e}"
 
     try:
+        # --- Overlap detection against existing highlights ---
+        existing_anns = []
+        try:
+            att_children = zot.children(att_key)
+            for ann in att_children:
+                d = ann.get("data", {})
+                if d.get("itemType") == "annotation" and d.get("annotationType") == "highlight":
+                    existing_anns.append(d)
+        except Exception:
+            pass  # proceed without overlap check
+
+        normalized_new = _normalize_text(quoted_text).lower()
+        for ann in existing_anns:
+            existing_text = _normalize_text(ann.get("annotationText", "")).lower()
+
+            if normalized_new == existing_text:
+                # EXACT MATCH → update existing comment instead of duplicating
+                ann_key = ann.get("key")
+                ann_version = ann.get("version")
+                old_comment = ann.get("annotationComment", "")
+                separator = "\n---\n" if old_comment else ""
+                new_full_comment = old_comment + separator + comment
+                zot.update_item({
+                    "key": ann_key,
+                    "version": ann_version,
+                    "annotationComment": new_full_comment,
+                })
+                return f"Updated existing highlight [{ann_key}]: appended comment"
+
+            elif normalized_new in existing_text:
+                # NEW is sub-passage of EXISTING → create in contrasting color
+                if color == DEFAULT_HIGHLIGHT_COLOR:
+                    existing_color = ann.get("annotationColor", DEFAULT_HIGHLIGHT_COLOR)
+                    color = next((c for c in HIGHLIGHT_COLORS if c != existing_color), "#ff6666")
+                break  # proceed to create with new color
+
+            elif existing_text in normalized_new:
+                # EXISTING is sub-passage of NEW → update existing comment
+                ann_key = ann.get("key")
+                ann_version = ann.get("version")
+                old_comment = ann.get("annotationComment", "")
+                separator = "\n---\n" if old_comment else ""
+                new_full_comment = old_comment + separator + comment
+                zot.update_item({
+                    "key": ann_key,
+                    "version": ann_version,
+                    "annotationComment": new_full_comment,
+                })
+                return f"Updated existing highlight [{ann_key}]: appended comment (broader passage)"
+
         doc = fitz.open(tmp_path)
         found_rects = []
         found_page = None
-
-        def _normalize_text(t: str) -> str:
-            """Normalize ligatures, quotes, and whitespace for matching."""
-            t = t.replace("\ufb01", "fi").replace("\ufb02", "fl")
-            t = t.replace("\ufb00", "ff").replace("\ufb03", "ffi").replace("\ufb04", "ffl")
-            t = t.replace("\u201c", '"').replace("\u201d", '"')
-            t = t.replace("\u2018", "'").replace("\u2019", "'")
-            t = t.replace("\u2013", "-").replace("\u2014", "-")
-            return re.sub(r"\s+", " ", t.strip())
 
         search_norm = _normalize_text(quoted_text).lower()
 
