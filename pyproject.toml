@@ -24,6 +24,7 @@ dependencies = [
     "pyzotero>=1.5.0",
     "httpx>=0.27.0",
     "pymupdf>=1.24.0",
+    "fuzzysearch>=0.8.1",
 ]
 
 [project.urls]

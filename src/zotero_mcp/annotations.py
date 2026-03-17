@@ -4,8 +4,8 @@ import json
 import os
 import re
 import tempfile
-
 import fitz
+from fuzzysearch import find_near_matches
 
 from ._helpers import (
     _download_pdf,
@@ -27,6 +27,45 @@ def _normalize_text(t: str) -> str:
     t = t.replace("\u2018", "'").replace("\u2019", "'")
     t = t.replace("\u2013", "-").replace("\u2014", "-")
     return re.sub(r"\s+", " ", t.strip())
+
+
+def _fuzzy_find_in_page(words, word_texts, search_norm, max_l_dist=None):
+    """Find the best fuzzy match for search_norm in a page's word list.
+
+    Uses fuzzysearch (Levenshtein-based) on the joined word text, then maps
+    the character-level match back to word bounding boxes. Returns
+    (rects, matched_text, dist) or (None, None, None) if no match found.
+    """
+    if not words or not search_norm:
+        return None, None, None
+
+    full_text = " ".join(w.lower() for w in word_texts)
+    # Default: allow up to 20% of search length as edit distance
+    max_dist = max_l_dist if max_l_dist is not None else max(1, len(search_norm) // 5)
+
+    matches = find_near_matches(search_norm, full_text, max_l_dist=max_dist)
+    if not matches:
+        return None, None, None
+
+    # Pick the match with the lowest edit distance
+    best = min(matches, key=lambda m: m.dist)
+
+    # Map character positions back to word indices
+    char_count = 0
+    match_rects = []
+    matched_words = []
+    for i, w in enumerate(words):
+        word_start = char_count
+        word_end = char_count + len(word_texts[i])
+        if word_end > best.start and word_start < best.end:
+            match_rects.append(fitz.Rect(w[0], w[1], w[2], w[3]))
+            matched_words.append(w[4])
+        char_count = word_end + 1  # +1 for the space
+
+    if not match_rects:
+        return None, None, None
+
+    return match_rects, " ".join(matched_words), best.dist
 
 
 def register(mcp):
@@ -71,12 +110,14 @@ def register(mcp):
         quoted_text: str,
         comment: str = "",
         color: str = DEFAULT_HIGHLIGHT_COLOR,
+        max_l_dist: int | None = None,
     ) -> str:
         """Highlight a text passage in a PDF attached to a Zotero item.
 
-        Searches the PDF for the exact quoted text and creates a visible
-        highlight annotation in Zotero's PDF reader. Use this to mark the
-        source of a citation so the user can verify it.
+        Searches the PDF for the quoted text and creates a visible highlight
+        annotation in Zotero's PDF reader. Uses three strategies in order:
+        exact match, normalized word match, and fuzzy match (for OCR errors,
+        hyphenation differences, or minor transcription mismatches).
 
         Smart overlap handling:
         - If the same text is already highlighted, appends the new comment
@@ -87,9 +128,13 @@ def register(mcp):
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
-            quoted_text: The exact text passage to highlight in the PDF
+            quoted_text: The text passage to highlight in the PDF (fuzzy matching
+                         handles minor differences from the actual PDF text)
             comment: Optional comment to attach to the highlight
             color: Highlight color as hex (default "#ffd400" yellow)
+            max_l_dist: Maximum Levenshtein distance for fuzzy matching. Default
+                        is ~20% of the search text length. Increase if the PDF
+                        has many OCR errors; decrease for stricter matching.
         """
         zot = _get_zot()
         tmp_path = None
@@ -191,6 +236,31 @@ def register(mcp):
                         found_page = page
                         break
 
+            # Strategy 3: fuzzy matching fallback
+            fuzzy_matched_text = None
+            if not found_rects:
+                best_page = None
+                best_rects = None
+                best_text = None
+                best_dist = None
+                for page in doc:
+                    words = page.get_text("words")
+                    if not words:
+                        continue
+                    word_texts = [_normalize_text(w[4]) for w in words]
+                    rects, matched, dist = _fuzzy_find_in_page(
+                        words, word_texts, search_norm, max_l_dist
+                    )
+                    if rects and (best_dist is None or dist < best_dist):
+                        best_dist = dist
+                        best_page = page
+                        best_rects = rects
+                        best_text = matched
+                if best_rects:
+                    found_rects = best_rects
+                    found_page = best_page
+                    fuzzy_matched_text = best_text
+
             if not found_rects or found_page is None:
                 doc.close()
                 return f"Text not found in PDF: \"{quoted_text[:80]}...\""
@@ -213,11 +283,14 @@ def register(mcp):
 
             doc.close()
 
+            # Use the actual matched text from the PDF when fuzzy-matched
+            annotation_text = fuzzy_matched_text if fuzzy_matched_text else quoted_text
+
             annotation = {
                 "itemType": "annotation",
                 "parentItem": att_key,
                 "annotationType": "highlight",
-                "annotationText": quoted_text,
+                "annotationText": annotation_text,
                 "annotationComment": comment,
                 "annotationColor": color,
                 "annotationPageLabel": page_label,
@@ -250,7 +323,10 @@ def register(mcp):
                 except Exception:
                     preview_path = ""
 
-                msg = f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
+                if fuzzy_matched_text:
+                    msg = f"Created highlight [{ann_key}] on page {page_label} (fuzzy match): \"{fuzzy_matched_text[:60]}...\""
+                else:
+                    msg = f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
                 if preview_path:
                     msg += f"\n\nPreview image saved to: {preview_path}"
                     msg += "\nOpen or read this image to visually verify the highlight placement."

@@ -2,11 +2,14 @@
 
 import os
 import re
+import shutil
+import tempfile
 
 import bibtexparser
 import httpx
 
 from ._helpers import (
+    _download_pdf,
     _fmt_item,
     _get_zot,
     _resolve_doi,
@@ -158,13 +161,31 @@ def register(mcp):
 
     @mcp.tool()
     async def get_item_fulltext(item_key: str) -> str:
-        """Get the full text content of a paper (e.g. from an indexed PDF attachment).
+        """Get the full text of a paper by downloading its PDF.
+
+        Downloads the PDF attachment to a temporary file and returns the
+        path so you can read it directly. This gives you the actual
+        formatted PDF content rather than Zotero's plain-text index.
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
         """
         zot = _get_zot()
 
+        try:
+            tmp_path, att_key = await _download_pdf(zot, item_key)
+        except Exception:
+            tmp_path = None
+
+        if tmp_path:
+            stable_path = tempfile.mktemp(suffix=".pdf", prefix="zotero_fulltext_")
+            shutil.move(tmp_path, stable_path)
+            return (
+                f"PDF downloaded to: {stable_path}\n"
+                f"Read this PDF file to access the full text of the paper."
+            )
+
+        # Fallback to Zotero's plain-text index if no PDF available
         try:
             children = zot.children(item_key)
         except Exception as e:
