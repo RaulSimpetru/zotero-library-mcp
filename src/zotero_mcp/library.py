@@ -7,6 +7,7 @@ import tempfile
 
 import bibtexparser
 import httpx
+from fuzzysearch import find_near_matches
 
 from ._helpers import (
     _download_pdf,
@@ -45,9 +46,41 @@ def register(mcp):
         lines = [_fmt_item(item) for item in unfiled[:limit]]
         return f"{len(unfiled)} unfiled items (showing {len(lines)}):\n" + "\n".join(lines)
 
+    def _fuzzy_search_items(zot, query: str, limit: int) -> list[dict]:
+        """Fuzzy-match query against all library item titles and authors."""
+        query_norm = re.sub(r"\s+", " ", query.strip().lower())
+        if not query_norm:
+            return []
+
+        all_items = zot.everything(zot.top())
+        max_dist = max(1, len(query_norm) // 4)
+        scored = []
+
+        for item in all_items:
+            data = item.get("data", {})
+            if data.get("itemType") in ("attachment", "note"):
+                continue
+
+            title = data.get("title", "")
+            creators = data.get("creators", [])
+            author_str = " ".join(
+                f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()
+                for c in creators
+            )
+            searchable = f"{title} {author_str}".lower()
+
+            matches = find_near_matches(query_norm, searchable, max_l_dist=max_dist)
+            if matches:
+                best_dist = min(m.dist for m in matches)
+                scored.append((best_dist, data))
+
+        scored.sort(key=lambda x: x[0])
+        return [data for _, data in scored[:limit]]
+
     @mcp.tool()
     async def search_library(query: str, limit: int = 10) -> str:
-        """Search your Zotero library.
+        """Search your Zotero library. Falls back to fuzzy matching if the
+        exact search returns no results.
 
         Args:
             query: Search query (searches titles, authors, tags, etc.)
@@ -56,11 +89,17 @@ def register(mcp):
         zot = _get_zot()
         results = zot.items(q=query, limit=limit)
 
-        if not results:
+        if results:
+            lines = [_fmt_item(item.get("data", {})) for item in results]
+            return "\n".join(lines)
+
+        # Fuzzy fallback
+        fuzzy_results = _fuzzy_search_items(zot, query, limit)
+        if not fuzzy_results:
             return "No results."
 
-        lines = [_fmt_item(item.get("data", {})) for item in results]
-        return "\n".join(lines)
+        lines = [_fmt_item(item) for item in fuzzy_results]
+        return f"No exact matches — fuzzy results:\n" + "\n".join(lines)
 
     @mcp.tool()
     async def get_item_details(item_key: str) -> str:
