@@ -16,7 +16,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 
 ### Searching & browsing
 
-- **`search_library`** — Search your Zotero library by title, author, tag, etc.
+- **`search_library`** — Search your Zotero library by title, author, tag, etc. (falls back to fuzzy matching when the exact search returns no results)
 - **`get_item_details`** — View full metadata for any item
 - **`get_recent_items`** — List recently added items
 - **`get_unfiled_items`** — Get items not in any collection
@@ -24,7 +24,7 @@ An MCP server that lets AI assistants add papers and books to your Zotero librar
 ### Reading & annotating
 
 - **`get_item_fulltext`** — Get the full text of an indexed PDF
-- **`get_bibtex`** — Export BibTeX for one or more items, a collection, or your full library (with optional `save_path` to write a `.bib` file directly)
+- **`get_bibtex`** — Export BibTeX for one or more items, a collection, or your full library (abstracts stripped by default to save tokens; with optional `save_path` to write a `.bib` file directly)
 - **`get_annotations`** — List all highlights and annotations on a paper's PDF
 - **`create_annotation`** — Highlight a text passage in a PDF (searches for the exact text, creates a visible highlight in Zotero's reader, and returns a preview image for verification). Smart overlap handling: exact duplicates update the existing comment; sub-passages get a contrasting highlight color automatically.
 - **`add_note`** — Add a note to an item
