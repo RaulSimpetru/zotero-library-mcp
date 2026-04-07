@@ -148,6 +148,7 @@ def register(mcp):
         item_keys: list[str] | None = None,
         collection_id: str | None = None,
         save_path: str | None = None,
+        include_abstract: bool = False,
     ) -> str:
         """Export BibTeX entries from your Zotero library.
 
@@ -159,12 +160,18 @@ def register(mcp):
             item_keys: Optional list of item keys to export. If omitted, exports collection or full library.
             collection_id: Optional collection key to export all items from.
             save_path: Optional file path to save the .bib output to (e.g. "/path/to/refs.bib").
+            include_abstract: Include abstracts in BibTeX output (default False to save tokens).
         """
         zot = _get_zot()
 
         def _bib_to_str(result: object) -> str:
             if isinstance(result, bibtexparser.bibdatabase.BibDatabase):
+                if not include_abstract:
+                    for entry in result.entries:
+                        entry.pop("abstract", None)
                 return bibtexparser.dumps(result)
+            if not include_abstract:
+                return re.sub(r"\s*abstract\s*=\s*\{[^}]*\},?\n?", "\n", str(result))
             return str(result)
 
         try:
