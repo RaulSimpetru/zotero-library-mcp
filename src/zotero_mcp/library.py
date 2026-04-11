@@ -149,6 +149,7 @@ def register(mcp):
         collection_id: str | None = None,
         save_path: str | None = None,
         include_abstract: bool = False,
+        biblatex: bool = False,
     ) -> str:
         """Export BibTeX entries from your Zotero library.
 
@@ -161,18 +162,59 @@ def register(mcp):
             collection_id: Optional collection key to export all items from.
             save_path: Optional file path to save the .bib output to (e.g. "/path/to/refs.bib").
             include_abstract: Include abstracts in BibTeX output (default False to save tokens).
+            biblatex: Convert output to BibLaTeX format (default False). Remaps fields like journal→journaltitle, address→location, and merges year+month into date.
         """
         zot = _get_zot()
+
+        # BibTeX → BibLaTeX field remapping
+        _BIBLATEX_FIELD_MAP = {
+            "journal": "journaltitle",
+            "address": "location",
+            "school": "institution",
+        }
+        _MONTH_MAP = {
+            "january": "01", "february": "02", "march": "03", "april": "04",
+            "may": "05", "june": "06", "july": "07", "august": "08",
+            "september": "09", "october": "10", "november": "11", "december": "12",
+            "jan": "01", "feb": "02", "mar": "03", "apr": "04",
+            "jun": "06", "jul": "07", "aug": "08", "sep": "09",
+            "oct": "10", "nov": "11", "dec": "12",
+        }
+
+        def _to_biblatex(entry: dict) -> dict:
+            """Convert a single BibTeX entry dict to BibLaTeX conventions."""
+            for old_field, new_field in _BIBLATEX_FIELD_MAP.items():
+                if old_field in entry and new_field not in entry:
+                    entry[new_field] = entry.pop(old_field)
+            # Merge year + month into date field
+            if "year" in entry and "date" not in entry:
+                year = entry.pop("year")
+                month = entry.pop("month", None)
+                if month:
+                    mm = _MONTH_MAP.get(month.strip().lower(), month)
+                    entry["date"] = f"{year}-{mm}"
+                else:
+                    entry["date"] = year
+            elif "month" in entry and "date" in entry:
+                entry.pop("month", None)
+            return entry
 
         def _bib_to_str(result: object) -> str:
             if isinstance(result, bibtexparser.bibdatabase.BibDatabase):
                 if not include_abstract:
                     for entry in result.entries:
                         entry.pop("abstract", None)
+                if biblatex:
+                    for entry in result.entries:
+                        _to_biblatex(entry)
                 return bibtexparser.dumps(result)
+            text = str(result)
             if not include_abstract:
-                return re.sub(r"\s*abstract\s*=\s*\{[^}]*\},?\n?", "\n", str(result))
-            return str(result)
+                text = re.sub(r"\s*abstract\s*=\s*\{[^}]*\},?\n?", "\n", text)
+            if biblatex:
+                for old_f, new_f in _BIBLATEX_FIELD_MAP.items():
+                    text = re.sub(rf"(\s*){old_f}(\s*=)", rf"\1{new_f}\2", text)
+            return text
 
         try:
             if item_keys:
@@ -199,7 +241,8 @@ def register(mcp):
                 with open(os.path.expanduser(save_path), "w", encoding="utf-8") as f:
                     f.write(bib)
                 n_entries = bib.count("@")
-                return f"Saved {n_entries} BibTeX entries to {save_path}"
+                fmt = "BibLaTeX" if biblatex else "BibTeX"
+                return f"Saved {n_entries} {fmt} entries to {save_path}"
             except Exception as e:
                 return f"Failed to save file: {e}"
 
