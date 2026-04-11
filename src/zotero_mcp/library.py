@@ -185,9 +185,9 @@ def register(mcp):
                     return "No BibTeX data available for the specified items."
                 bib = "\n\n".join(parts)
             elif collection_id:
-                bib = _bib_to_str(zot.collection_items(collection_id, format="bibtex"))
+                bib = _bib_to_str(zot.everything(zot.collection_items(collection_id, format="bibtex")))
             else:
-                bib = _bib_to_str(zot.items(format="bibtex"))
+                bib = _bib_to_str(zot.everything(zot.items(format="bibtex")))
         except Exception as e:
             return f"Could not export BibTeX: {e}"
 
