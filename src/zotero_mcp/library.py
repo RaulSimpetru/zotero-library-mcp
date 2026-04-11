@@ -181,6 +181,26 @@ def register(mcp):
             "oct": "10", "nov": "11", "dec": "12",
         }
 
+        def _clean_braces(value: str) -> str:
+            """Strip Zotero's over-eager case-protection braces from titles.
+
+            Keeps braces around acronyms (all-caps like {EMG}, {IEEE}),
+            LaTeX commands (e.g. {\\textless}), and mixed-case names
+            (e.g. {OpenMonkeyStudio}, {DeepLabCut}). Removes braces from
+            regular title-cased words (e.g. {Review} → Review).
+            """
+            def _should_keep(m: re.Match) -> str:
+                inner = m.group(1)
+                # Keep: all-caps (acronyms), contains backslash (LaTeX),
+                # contains digits, or has internal caps (camelCase/PascalCase names)
+                if (inner.isupper() or
+                    "\\" in inner or
+                    any(c.isdigit() for c in inner) or
+                    (len(inner) > 1 and any(c.isupper() for c in inner[1:]))):
+                    return m.group(0)
+                return inner
+            return re.sub(r"\{([^{}]+)\}", _should_keep, value)
+
         def _to_biblatex(entry: dict) -> dict:
             """Convert a single BibTeX entry dict to BibLaTeX conventions."""
             for old_field, new_field in _BIBLATEX_FIELD_MAP.items():
@@ -197,6 +217,10 @@ def register(mcp):
                     entry["date"] = year
             elif "month" in entry and "date" in entry:
                 entry.pop("month", None)
+            # Clean over-braced titles
+            for field in ("title", "shorttitle", "booktitle"):
+                if field in entry:
+                    entry[field] = _clean_braces(entry[field])
             return entry
 
         def _bib_to_str(result: object) -> str:
