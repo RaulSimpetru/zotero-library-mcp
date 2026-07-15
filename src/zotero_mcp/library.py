@@ -1,58 +1,166 @@
 """Tools for browsing, searching, and managing library items."""
 
+import asyncio
+import difflib
 import os
 import re
-import shutil
-import tempfile
+from collections import defaultdict
+from pathlib import Path
 
 import bibtexparser
-import httpx
+import fitz
 from fuzzysearch import find_near_matches
+from mcp.types import CallToolResult
 
 from ._helpers import (
     _download_pdf,
     _fmt_item,
     _get_zot,
     _resolve_doi,
+    _use_webdav,
+    _validate_limit,
+    _zot_call,
 )
+from .responses import tool_error
+from .runtime import validate_server_path
+from .tool_annotations import DESTRUCTIVE, READ_ONLY, READ_ONLY_OPEN_WORLD, WRITE
+
+
+def _filter_top_level(items: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in items
+        if item.get("data", {}).get("itemType") not in ("attachment", "note", "annotation")
+    ]
+
+
+def _extract_pdf_text(path: str, max_chars: int) -> tuple[str, bool]:
+    chunks: list[str] = []
+    length = 0
+    truncated = False
+    with fitz.open(path) as document:
+        for page in document:
+            text = page.get_text("text")
+            remaining = max_chars - length
+            if remaining <= 0:
+                truncated = True
+                break
+            chunks.append(text[:remaining])
+            length += len(chunks[-1])
+            if len(text) > remaining:
+                truncated = True
+                break
+    return "".join(chunks), truncated
+
+
+async def _recent_top_level(zot, limit: int) -> list[dict]:
+    results: list[dict] = []
+    start = 0
+    page_size = min(100, max(limit * 2, 20))
+    while len(results) < limit and start < 1000:
+        page = await _zot_call(
+            zot.items,
+            sort="dateAdded",
+            direction="desc",
+            limit=page_size,
+            start=start,
+        )
+        if not page:
+            break
+        results.extend(_filter_top_level(page))
+        if len(page) < page_size:
+            break
+        start += page_size
+    return results[:limit]
+
+
+async def _top_items_bounded(zot, maximum: int) -> list[dict]:
+    items: list[dict] = []
+    start = 0
+    while len(items) < maximum:
+        page_size = min(100, maximum - len(items))
+        page = await _zot_call(zot.top, limit=page_size, start=start)
+        if not page:
+            break
+        items.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+    return items
+
+
+def _patch_item_partial(
+    zot,
+    item_key: str,
+    version: int,
+    changes: dict[str, object],
+):
+    """Apply an optimistic-concurrency-protected partial item update."""
+
+    url = (
+        f"{zot.endpoint.rstrip('/')}/{zot.library_type}/"
+        f"{zot.library_id}/items/{item_key.upper()}"
+    )
+    response = zot.client.patch(
+        url,
+        headers={"If-Unmodified-Since-Version": str(version)},
+        json=changes,
+    )
+    response.raise_for_status()
+    return response
 
 
 def register(mcp):
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_unfiled_items(limit: int = 25) -> str:
         """Get items that are not in any collection (unfiled items).
 
         Args:
             limit: Maximum number of items to return (default 25)
         """
-        zot = _get_zot()
-
         try:
-            all_items = zot.everything(zot.top())
+            limit = _validate_limit(limit)
+            zot = _get_zot()
         except Exception as e:
-            return f"Could not fetch items: {e}"
+            return tool_error(str(e))
 
         unfiled = []
-        for item in all_items:
-            data = item.get("data", {})
-            if data.get("itemType") in ("attachment", "note"):
-                continue
-            if not data.get("collections"):
-                unfiled.append(data)
+        start = 0
+        page_size = 100
+        # Stay bounded even for very large libraries while avoiding a full
+        # ``everything(top())`` download for the common case.
+        while len(unfiled) < limit and start < 5000:
+            try:
+                page = await _zot_call(zot.top, limit=page_size, start=start)
+            except Exception as e:
+                return tool_error(f"Could not fetch items: {e}")
+            if not page:
+                break
+            for item in page:
+                data = item.get("data", {})
+                if data.get("itemType") in ("attachment", "note", "annotation"):
+                    continue
+                if not data.get("collections"):
+                    unfiled.append(data)
+                    if len(unfiled) >= limit:
+                        break
+            if len(page) < page_size:
+                break
+            start += page_size
 
         if not unfiled:
             return "No unfiled items."
 
-        lines = [_fmt_item(item) for item in unfiled[:limit]]
-        return f"{len(unfiled)} unfiled items (showing {len(lines)}):\n" + "\n".join(lines)
+        lines = [_fmt_item(item) for item in unfiled]
+        suffix = " (scan capped at 5,000 items)" if start >= 5000 else ""
+        return f"Unfiled items (showing {len(lines)}){suffix}:\n" + "\n".join(lines)
 
-    def _fuzzy_search_items(zot, query: str, limit: int) -> list[dict]:
-        """Fuzzy-match query against all library item titles and authors."""
+    def _rank_fuzzy_items(all_items: list[dict], query: str, limit: int) -> list[dict]:
+        """Fuzzy-match query against a bounded set of item titles, authors, and tags."""
         query_norm = re.sub(r"\s+", " ", query.strip().lower())
         if not query_norm:
             return []
 
-        all_items = zot.everything(zot.top())
         max_dist = max(1, len(query_norm) // 4)
         scored = []
 
@@ -67,7 +175,8 @@ def register(mcp):
                 f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()
                 for c in creators
             )
-            searchable = f"{title} {author_str}".lower()
+            tag_str = " ".join(tag.get("tag", "") for tag in data.get("tags", []))
+            searchable = f"{title} {author_str} {tag_str}".lower()
 
             matches = find_near_matches(query_norm, searchable, max_l_dist=max_dist)
             if matches:
@@ -77,7 +186,7 @@ def register(mcp):
         scored.sort(key=lambda x: x[0])
         return [data for _, data in scored[:limit]]
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_library(query: str, limit: int = 10) -> str:
         """Search your Zotero library. Falls back to fuzzy matching if the
         exact search returns no results.
@@ -86,22 +195,32 @@ def register(mcp):
             query: Search query (searches titles, authors, tags, etc.)
             limit: Maximum number of results (default 10)
         """
-        zot = _get_zot()
-        results = zot.items(q=query, limit=limit)
+        try:
+            limit = _validate_limit(limit, maximum=50)
+            if not query.strip():
+                return tool_error("query must not be empty")
+            zot = _get_zot()
+            results = await _zot_call(zot.items, q=query.strip(), limit=limit)
+        except Exception as exc:
+            return tool_error(f"Could not search the Zotero library: {exc}")
 
         if results:
             lines = [_fmt_item(item.get("data", {})) for item in results]
             return "\n".join(lines)
 
         # Fuzzy fallback
-        fuzzy_results = _fuzzy_search_items(zot, query, limit)
+        try:
+            top_query = await _top_items_bounded(zot, 1000)
+            fuzzy_results = _rank_fuzzy_items(top_query, query, limit)
+        except Exception as exc:
+            return tool_error(f"Exact search returned no results and fuzzy search failed: {exc}")
         if not fuzzy_results:
             return "No results."
 
         lines = [_fmt_item(item) for item in fuzzy_results]
-        return f"No exact matches — fuzzy results:\n" + "\n".join(lines)
+        return "No exact matches — fuzzy results:\n" + "\n".join(lines)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_item_details(item_key: str) -> str:
         """Get full details of a Zotero item by its key.
 
@@ -111,9 +230,9 @@ def register(mcp):
         zot = _get_zot()
 
         try:
-            item = zot.item(item_key)
+            item = await _zot_call(zot.item, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            return tool_error(f"Could not find item {item_key}: {e}")
 
         data = item.get("data", {})
         lines = [f"[{item_key}] {data.get('title', '?')}"]
@@ -126,7 +245,9 @@ def register(mcp):
         fields = [
             ("Type", "itemType"), ("Date", "date"), ("DOI", "DOI"),
             ("Journal", "publicationTitle"), ("Vol", "volume"),
-            ("Issue", "issue"), ("Pages", "pages"),
+            ("Issue", "issue"), ("Pages", "pages"), ("ISBN", "ISBN"),
+            ("Publisher", "publisher"), ("Place", "place"),
+            ("URL", "url"), ("Language", "language"),
         ]
         for label, key in fields:
             val = data.get(key, "")
@@ -139,32 +260,59 @@ def register(mcp):
 
         abstract = data.get("abstractNote", "")
         if abstract:
-            lines.append(f"Abstract: {abstract}")
+            truncated = len(abstract) > 10000
+            lines.append(f"Abstract: {abstract[:10000]}")
+            if truncated:
+                lines.append("[Abstract truncated at 10,000 characters]")
+
+        collections = data.get("collections", [])
+        if collections:
+            lines.append(f"Collections: {', '.join(collections)}")
+
+        try:
+            children = await _zot_call(zot.children, item_key)
+            attachment_count = sum(
+                child.get("data", {}).get("itemType") == "attachment" for child in children
+            )
+            note_count = sum(child.get("data", {}).get("itemType") == "note" for child in children)
+            lines.append(f"Children: {attachment_count} attachment(s), {note_count} note(s)")
+        except Exception:
+            pass
 
         return "\n".join(lines)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_bibtex(
         item_keys: list[str] | None = None,
         collection_id: str | None = None,
-        save_path: str | None = None,
         include_abstract: bool = False,
         biblatex: bool = False,
+        max_chars: int | None = 100000,
     ) -> str:
         """Export BibTeX entries from your Zotero library.
 
         Can export specific items, an entire collection, or your whole library.
-        Use save_path to write directly to a .bib file instead of returning the
-        full content (recommended for large exports to save tokens).
+        Use save_bibtex when the export should be written to a local file.
 
         Args:
             item_keys: Optional list of item keys to export. If omitted, exports collection or full library.
             collection_id: Optional collection key to export all items from.
-            save_path: Optional file path to save the .bib output to (e.g. "/path/to/refs.bib").
             include_abstract: Include abstracts in BibTeX output (default False to save tokens).
             biblatex: Convert output to BibLaTeX format (default False). Remaps fields like journal→journaltitle, address→location, and merges year+month into date.
+            max_chars: Maximum response size; use save_bibtex for larger full-library exports
         """
-        zot = _get_zot()
+        try:
+            if item_keys is not None and not item_keys:
+                raise ValueError("item_keys must not be an empty list")
+            if item_keys and collection_id:
+                raise ValueError("Provide item_keys or collection_id, not both")
+            if item_keys and len(item_keys) > 50:
+                raise ValueError("A maximum of 50 item keys can be exported at once")
+            if max_chars is not None and not 1000 <= max_chars <= 1000000:
+                raise ValueError("max_chars must be between 1,000 and 1,000,000, or null")
+            zot = _get_zot()
+        except Exception as exc:
+            return tool_error(f"Invalid BibTeX export request: {exc}")
 
         # BibTeX → BibLaTeX field remapping
         _BIBLATEX_FIELD_MAP = {
@@ -233,92 +381,172 @@ def register(mcp):
                         _to_biblatex(entry)
                 return bibtexparser.dumps(result)
             text = str(result)
+            try:
+                parsed = bibtexparser.loads(text)
+                if parsed.entries:
+                    if not include_abstract:
+                        for entry in parsed.entries:
+                            entry.pop("abstract", None)
+                    if biblatex:
+                        for entry in parsed.entries:
+                            _to_biblatex(entry)
+                    return bibtexparser.dumps(parsed)
+            except Exception:
+                pass
+            # Last-resort fallback for malformed exporters. Match multiline
+            # values conservatively; valid BibTeX takes the parser path above.
             if not include_abstract:
-                text = re.sub(r"\s*abstract\s*=\s*\{[^}]*\},?\n?", "\n", text)
+                text = re.sub(
+                    r"(?ims)^\s*abstract\s*=\s*(?:\{.*?\}|\".*?\")\s*,?\s*$",
+                    "",
+                    text,
+                )
             if biblatex:
                 for old_f, new_f in _BIBLATEX_FIELD_MAP.items():
-                    text = re.sub(rf"(\s*){old_f}(\s*=)", rf"\1{new_f}\2", text)
+                    text = re.sub(rf"(?im)^(\s*){old_f}(\s*=)", rf"\1{new_f}\2", text)
             return text
 
         try:
             if item_keys:
                 parts = []
                 for key in item_keys:
-                    result = zot.item(key, format="bibtex")
+                    result = await _zot_call(zot.item, key, format="bibtex")
                     if result:
                         parts.append(_bib_to_str(result).strip())
                 if not parts:
                     return "No BibTeX data available for the specified items."
                 bib = "\n\n".join(parts)
             elif collection_id:
-                bib = _bib_to_str(zot.everything(zot.collection_items(collection_id, format="bibtex")))
+                result = await _zot_call(
+                    lambda: zot.everything(
+                        zot.collection_items(collection_id, format="bibtex")
+                    )
+                )
+                bib = _bib_to_str(result)
             else:
-                bib = _bib_to_str(zot.everything(zot.items(format="bibtex")))
+                result = await _zot_call(lambda: zot.everything(zot.items(format="bibtex")))
+                bib = _bib_to_str(result)
         except Exception as e:
-            return f"Could not export BibTeX: {e}"
+            return tool_error(f"Could not export BibTeX: {e}")
 
         if not bib.strip():
             return "No BibTeX data available."
-
-        if save_path:
-            try:
-                with open(os.path.expanduser(save_path), "w", encoding="utf-8") as f:
-                    f.write(bib)
-                n_entries = bib.count("@")
-                fmt = "BibLaTeX" if biblatex else "BibTeX"
-                return f"Saved {n_entries} {fmt} entries to {save_path}"
-            except Exception as e:
-                return f"Failed to save file: {e}"
+        if max_chars is not None and len(bib) > max_chars:
+            return tool_error(
+                f"BibTeX export is {len(bib):,} characters, above max_chars={max_chars:,}. "
+                "Narrow the export, increase max_chars, or use save_bibtex."
+            )
 
         return bib
 
-    @mcp.tool()
-    async def get_item_fulltext(item_key: str) -> str:
-        """Get the full text of a paper by downloading its PDF.
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def save_bibtex(
+        save_path: str,
+        item_keys: list[str] | None = None,
+        collection_id: str | None = None,
+        include_abstract: bool = False,
+        biblatex: bool = False,
+    ) -> str:
+        """Export BibTeX or BibLaTeX and atomically write it to a local file.
 
-        Downloads the PDF attachment to a temporary file and returns the
-        path so you can read it directly. This gives you the actual
-        formatted PDF content rather than Zotero's plain-text index.
+        Path writes are available by default over local stdio. HTTP deployments
+        must explicitly allow a confined file root.
+        """
+
+        exported = await get_bibtex(
+            item_keys=item_keys,
+            collection_id=collection_id,
+            include_abstract=include_abstract,
+            biblatex=biblatex,
+            max_chars=None,
+        )
+        if isinstance(exported, CallToolResult):
+            return exported
+        if exported.startswith("No BibTeX data"):
+            return exported
+
+        temp_path: Path | None = None
+        try:
+            destination = validate_server_path(save_path, for_write=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+            temp_path.write_text(exported, encoding="utf-8")
+            os.replace(temp_path, destination)
+            parsed = bibtexparser.loads(exported)
+            count = len(parsed.entries)
+            fmt = "BibLaTeX" if biblatex else "BibTeX"
+            return f"Saved {count} {fmt} entries to {destination}"
+        except Exception as exc:
+            return tool_error(f"Failed to save BibTeX: {exc}")
+        finally:
+            if temp_path:
+                temp_path.unlink(missing_ok=True)
+
+    @mcp.tool(annotations=READ_ONLY_OPEN_WORLD)
+    async def get_item_fulltext(
+        item_key: str,
+        attachment_key: str | None = None,
+        max_chars: int = 50000,
+    ) -> str:
+        """Get bounded plain text from a paper's PDF or Zotero full-text index.
+
+        Unlike download_pdf, this returns readable text directly and never
+        exposes a server-local temporary path.
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
+            attachment_key: Optional PDF attachment key when an item has several PDFs
+            max_chars: Maximum number of characters to return (1,000-200,000)
         """
-        zot = _get_zot()
-
         try:
-            tmp_path, att_key = await _download_pdf(zot, item_key)
-        except Exception:
-            tmp_path = None
-
-        if tmp_path:
-            stable_path = tempfile.mktemp(suffix=".pdf", prefix="zotero_fulltext_")
-            shutil.move(tmp_path, stable_path)
-            return (
-                f"PDF downloaded to: {stable_path}\n"
-                f"Read this PDF file to access the full text of the paper."
-            )
-
-        # Fallback to Zotero's plain-text index if no PDF available
-        try:
-            children = zot.children(item_key)
+            if not 1000 <= max_chars <= 200000:
+                raise ValueError("max_chars must be between 1,000 and 200,000")
+            zot = _get_zot()
+            children = await _zot_call(zot.children, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            return tool_error(f"Could not find item {item_key}: {e}")
 
+        attachment_keys = []
         for child in children:
             child_data = child.get("data", {})
             child_key = child_data.get("key", "")
             if child_data.get("itemType") == "attachment" and child_key:
+                if attachment_key and child_key != attachment_key:
+                    continue
+                attachment_keys.append(child_key)
                 try:
-                    ft = zot.fulltext_item(child_key)
+                    ft = await _zot_call(zot.fulltext_item, child_key)
                     content = ft.get("content", "")
                     if content:
-                        return content
+                        truncated = len(content) > max_chars
+                        result = content[:max_chars]
+                        if truncated:
+                            result += "\n\n[Truncated; request another bounded view if needed.]"
+                        return result
                 except Exception:
                     continue
 
-        return "No full-text content available for this item."
+        if attachment_key and attachment_key not in attachment_keys:
+            return tool_error(
+                f"Attachment {attachment_key} is not a child attachment of item {item_key}"
+            )
 
-    @mcp.tool()
+        tmp_path = None
+        try:
+            tmp_path, _ = await _download_pdf(zot, item_key, attachment_key)
+            content, truncated = await asyncio.to_thread(_extract_pdf_text, tmp_path, max_chars)
+            if not content.strip():
+                return "No extractable full-text content is available for this PDF."
+            if truncated:
+                content += "\n\n[Truncated; increase max_chars for a larger bounded result.]"
+            return content
+        except Exception as exc:
+            return tool_error(f"Could not retrieve full text: {exc}")
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+
+    @mcp.tool(annotations=DESTRUCTIVE)
     async def delete_item(item_key: str) -> str:
         """Permanently delete an item from your Zotero library.
 
@@ -328,45 +556,41 @@ def register(mcp):
         zot = _get_zot()
 
         try:
-            item = zot.item(item_key)
+            item = await _zot_call(zot.item, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            return tool_error(f"Could not find item {item_key}: {e}")
 
         title = item.get("data", {}).get("title", item_key)
 
         try:
-            zot.delete_item(item)
+            await _zot_call(zot.delete_item, item)
         except Exception as e:
-            return f"Failed to delete item: {e}"
+            return tool_error(f"Failed to delete item: {e}")
 
         return f"Deleted [{item_key}] {title}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_recent_items(limit: int = 10) -> str:
         """Get recently added items from your Zotero library.
 
         Args:
             limit: Maximum number of items to return (default 10)
         """
-        zot = _get_zot()
-
         try:
-            results = zot.items(sort="dateAdded", direction="desc", limit=limit)
+            limit = _validate_limit(limit, maximum=100)
+            zot = _get_zot()
+            results = await _recent_top_level(zot, limit)
         except Exception as e:
-            return f"Could not fetch recent items: {e}"
+            return tool_error(f"Could not fetch recent items: {e}")
 
         if not results:
             return "No items."
 
-        lines = []
-        for item in results:
-            data = item.get("data", {})
-            if data.get("itemType") not in ("attachment", "note"):
-                lines.append(_fmt_item(data))
+        lines = [_fmt_item(item.get("data", {})) for item in results]
 
         return "\n".join(lines) if lines else "No items."
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_OPEN_WORLD)
     async def verify_items(limit: int = 10) -> str:
         """Verify that recently added items have valid DOIs that match CrossRef metadata.
 
@@ -376,55 +600,319 @@ def register(mcp):
         Args:
             limit: Number of recent items to check (default 10)
         """
-        zot = _get_zot()
-
         try:
-            results = zot.items(sort="dateAdded", direction="desc", limit=limit)
+            limit = _validate_limit(limit, maximum=50)
+            zot = _get_zot()
+            items = await _recent_top_level(zot, limit)
         except Exception as e:
-            return f"Could not fetch items: {e}"
-
-        items = [
-            item for item in results
-            if item.get("data", {}).get("itemType") not in ("attachment", "note")
-        ]
+            return tool_error(f"Could not fetch items: {e}")
 
         if not items:
             return "No items to verify."
 
-        lines = []
-        ok_count = 0
-
-        for item in items:
+        async def _verify_one(item: dict) -> tuple[str, str]:
             data = item.get("data", {})
             key = data.get("key", "?")
             title = data.get("title", "Untitled")
             doi = data.get("DOI", "")
 
             if not doi:
-                lines.append(f"[{key}] SKIP — no DOI: {title}")
-                continue
+                return "skip", f"[{key}] SKIP — no DOI: {title}"
 
             try:
                 cr_data = await _resolve_doi(doi)
             except Exception:
-                lines.append(f"[{key}] FAIL — DOI does not resolve: {doi}")
-                continue
+                return "fail", f"[{key}] FAIL — DOI does not resolve: {doi}"
 
             msg = cr_data.get("message", cr_data)
             cr_titles = msg.get("title", [])
             cr_title = cr_titles[0] if cr_titles else ""
 
-            zot_norm = re.sub(r"\s+", " ", title.strip().lower())
-            cr_norm = re.sub(r"\s+", " ", cr_title.strip().lower())
+            zot_norm = re.sub(r"[^\w]+", " ", title.casefold()).strip()
+            cr_norm = re.sub(r"[^\w]+", " ", cr_title.casefold()).strip()
+            similarity = difflib.SequenceMatcher(None, zot_norm, cr_norm).ratio()
 
-            if zot_norm == cr_norm:
-                lines.append(f"[{key}] OK — {title}")
-                ok_count += 1
+            if similarity >= 0.92:
+                return "ok", f"[{key}] OK — {title}"
+            return (
+                "mismatch",
+                f"[{key}] MISMATCH ({similarity:.0%}) — Zotero: {title}\n"
+                f"        CrossRef: {cr_title}",
+            )
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def _bounded(item: dict) -> tuple[str, str]:
+            async with semaphore:
+                return await _verify_one(item)
+
+        checked = await asyncio.gather(*(_bounded(item) for item in items))
+        counts: defaultdict[str, int] = defaultdict(int)
+        lines = []
+        for status, line in checked:
+            counts[status] += 1
+            lines.append(line)
+
+        header = (
+            f"Verified {len(items)} items: {counts['ok']} OK, "
+            f"{counts['mismatch']} mismatch, {counts['fail']} failed, "
+            f"{counts['skip']} skipped"
+        )
+        return header + "\n" + "\n".join(lines)
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def health_check() -> dict[str, object]:
+        """Check Zotero credentials, library access, and optional file storage setup."""
+
+        try:
+            zot = _get_zot()
+            sample = await _zot_call(zot.items, limit=1)
+        except Exception as exc:
+            return tool_error(f"Zotero health check failed: {exc}")
+
+        return {
+            "ok": True,
+            "library_id": str(zot.library_id),
+            "library_type": zot.library_type,
+            "read_access": True,
+            "write_access": "not_probed",
+            "write_access_note": "Write access is not mutated during a health check.",
+            "webdav_configured": _use_webdav(),
+            "sample_item_available": bool(sample),
+        }
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def list_attachments(item_key: str, limit: int = 100) -> dict[str, object]:
+        """List attachment keys, filenames, MIME types, links, and sizes for an item."""
+
+        try:
+            limit = _validate_limit(limit, maximum=500)
+            zot = _get_zot()
+            await _zot_call(zot.item, item_key)
+            children = await _zot_call(zot.children, item_key)
+        except Exception as exc:
+            return tool_error(f"Could not list attachments for {item_key}: {exc}")
+
+        attachments = []
+        for child in children:
+            data = child.get("data", {})
+            if data.get("itemType") != "attachment":
+                continue
+            attachments.append(
+                {
+                    "key": data.get("key", ""),
+                    "title": data.get("title", ""),
+                    "filename": data.get("filename", ""),
+                    "mime_type": data.get("contentType", ""),
+                    "link_mode": data.get("linkMode", ""),
+                    "url": data.get("url", ""),
+                    "md5": data.get("md5", ""),
+                    "mtime": data.get("mtime"),
+                }
+            )
+            if len(attachments) >= limit:
+                break
+        return {
+            "item_key": item_key,
+            "count": len(attachments),
+            "limit": limit,
+            "attachments": attachments,
+        }
+
+    @mcp.tool(annotations=WRITE)
+    async def update_item_metadata(
+        item_key: str,
+        updates: dict[str, str],
+        creators: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Update selected bibliographic fields and optionally replace creators.
+
+        Immutable/internal fields such as item type, key, version, parent item,
+        collections, tags, and deletion state cannot be changed through this tool.
+        """
+
+        if not updates and creators is None:
+            return tool_error("Provide at least one metadata update or a creators list")
+        if creators is not None:
+            for creator in creators:
+                if not creator.get("creatorType"):
+                    return tool_error("Every creator must include creatorType")
+                if not creator.get("name") and not creator.get("lastName"):
+                    return tool_error("Every creator must include name or lastName")
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, item_key)
+            data = item.get("data", {})
+            item_type = data.get("itemType", "")
+            template = await _zot_call(zot.item_template, item_type)
+            protected = {
+                "key",
+                "version",
+                "itemType",
+                "parentItem",
+                "deleted",
+                "collections",
+                "tags",
+                "relations",
+            }
+            unknown = sorted(
+                field for field in updates if field not in template or field in protected
+            )
+            if unknown:
+                return tool_error(
+                    f"Unsupported field(s) for Zotero {item_type}: {', '.join(unknown)}"
+                )
+            changes: dict[str, object] = dict(updates)
+            if creators is not None:
+                changes["creators"] = creators
+            version = int(data.get("version", item.get("version")))
+            key = str(data.get("key", item_key))
+            await _zot_call(_patch_item_partial, zot, key, version, changes)
+            title = str(updates.get("title", data.get("title", item_key)))
+            return f"Updated [{item_key}] {title}"
+        except Exception as exc:
+            return tool_error(f"Failed to update item metadata: {exc}")
+
+    @mcp.tool(annotations=WRITE)
+    async def trash_item(item_key: str) -> str:
+        """Move an item to Zotero's trash so it can be restored later."""
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, item_key)
+            data = item.get("data", {})
+            title = data.get("title", item_key)
+            version = int(data.get("version", item.get("version")))
+            key = str(data.get("key", item_key))
+            await _zot_call(_patch_item_partial, zot, key, version, {"deleted": True})
+            return f"Moved [{item_key}] {title} to trash"
+        except Exception as exc:
+            return tool_error(f"Failed to trash item: {exc}")
+
+    @mcp.tool(annotations=WRITE)
+    async def restore_item(item_key: str) -> str:
+        """Restore an item from Zotero's trash."""
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, item_key)
+            data = item.get("data", {})
+            title = data.get("title", item_key)
+            version = int(data.get("version", item.get("version")))
+            key = str(data.get("key", item_key))
+            await _zot_call(_patch_item_partial, zot, key, version, {"deleted": False})
+            return f"Restored [{item_key}] {title} from trash"
+        except Exception as exc:
+            return tool_error(f"Failed to restore item: {exc}")
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def find_duplicates(field: str = "DOI", limit: int = 50) -> dict[str, object]:
+        """Find duplicate top-level items by DOI, ISBN, or normalized title."""
+
+        field = field.upper() if field.upper() in {"DOI", "ISBN"} else field.lower()
+        if field not in {"DOI", "ISBN", "title"}:
+            return tool_error("field must be DOI, ISBN, or title")
+        try:
+            limit = _validate_limit(limit, maximum=200)
+            zot = _get_zot()
+            items = await _top_items_bounded(zot, 5000)
+        except Exception as exc:
+            return tool_error(f"Could not scan for duplicates: {exc}")
+
+        groups: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
+        for item in _filter_top_level(items):
+            data = item.get("data", {})
+            value = str(data.get(field, ""))
+            if field == "title":
+                normalized = re.sub(r"[^\w]+", " ", value.casefold()).strip()
             else:
-                lines.append(
-                    f"[{key}] MISMATCH — Zotero: {title}\n"
-                    f"        CrossRef: {cr_title}"
+                normalized = re.sub(r"[-\s]", "", value).casefold()
+            if normalized:
+                groups[normalized].append(
+                    {"key": data.get("key", ""), "title": data.get("title", "")}
                 )
 
-        header = f"Verified {len(items)} items: {ok_count} OK"
-        return header + "\n" + "\n".join(lines)
+        duplicates = [
+            {"value": normalized, "items": grouped}
+            for normalized, grouped in groups.items()
+            if len(grouped) > 1
+        ][:limit]
+        return {"field": field, "count": len(duplicates), "duplicates": duplicates}
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def search_fulltext(query: str, limit: int = 10) -> dict[str, object]:
+        """Search Zotero metadata and indexed full text using qmode=everything."""
+
+        if not query.strip():
+            return tool_error("query must not be empty")
+        try:
+            limit = _validate_limit(limit, maximum=50)
+            zot = _get_zot()
+            results = await _zot_call(
+                zot.items,
+                q=query.strip(),
+                qmode="everything",
+                limit=min(100, limit * 3),
+            )
+        except Exception as exc:
+            return tool_error(f"Full-text search failed: {exc}")
+
+        items = []
+        for item in _filter_top_level(results)[:limit]:
+            data = item.get("data", {})
+            items.append(
+                {
+                    "key": data.get("key", ""),
+                    "title": data.get("title", ""),
+                    "date": data.get("date", ""),
+                    "doi": data.get("DOI", ""),
+                    "url": data.get("url", ""),
+                }
+            )
+        return {"query": query, "count": len(items), "items": items}
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def search(query: str) -> dict[str, object]:
+        """Company-knowledge compatible search over Zotero items and full text."""
+
+        result = await search_fulltext(query=query, limit=10)
+        if isinstance(result, CallToolResult):
+            return result
+        return {
+            "results": [
+                {
+                    "id": item["key"],
+                    "title": item["title"],
+                    "url": item.get("url", ""),
+                }
+                for item in result["items"]
+            ]
+        }
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def fetch(id: str) -> dict[str, object]:
+        """Company-knowledge compatible fetch for one Zotero item key."""
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, id)
+        except Exception as exc:
+            return tool_error(f"Could not fetch item {id}: {exc}")
+        data = item.get("data", {})
+        fulltext = await get_item_fulltext(id, max_chars=30000)
+        if isinstance(fulltext, CallToolResult):
+            text = data.get("abstractNote", "")
+        else:
+            text = fulltext
+        return {
+            "id": id,
+            "title": data.get("title", ""),
+            "text": text,
+            "url": data.get("url", ""),
+            "metadata": {
+                "doi": data.get("DOI", ""),
+                "date": data.get("date", ""),
+                "item_type": data.get("itemType", ""),
+            },
+        }

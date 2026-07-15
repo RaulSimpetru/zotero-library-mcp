@@ -3,8 +3,6 @@
 import asyncio
 from unittest.mock import MagicMock
 
-import pytest
-
 from zotero_mcp.library import register
 
 
@@ -43,7 +41,7 @@ def _setup_mcp():
     mcp = MagicMock()
     registered = {}
 
-    def tool_decorator():
+    def tool_decorator(**_kwargs):
         def wrapper(fn):
             registered[fn.__name__] = fn
             return fn
@@ -73,8 +71,7 @@ class TestFuzzyLibrarySearch:
 
         mock_zot = MagicMock()
         mock_zot.items.return_value = []
-        mock_zot.top.return_value = "top_call"
-        mock_zot.everything.return_value = FAKE_ITEMS
+        mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
@@ -88,8 +85,7 @@ class TestFuzzyLibrarySearch:
 
         mock_zot = MagicMock()
         mock_zot.items.return_value = []
-        mock_zot.top.return_value = "top_call"
-        mock_zot.everything.return_value = FAKE_ITEMS
+        mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
@@ -102,8 +98,7 @@ class TestFuzzyLibrarySearch:
 
         mock_zot = MagicMock()
         mock_zot.items.return_value = []
-        mock_zot.top.return_value = "top_call"
-        mock_zot.everything.return_value = FAKE_ITEMS
+        mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
@@ -120,8 +115,7 @@ class TestFuzzyLibrarySearch:
 
         mock_zot = MagicMock()
         mock_zot.items.return_value = []
-        mock_zot.top.return_value = "top_call"
-        mock_zot.everything.return_value = items_with_attachment
+        mock_zot.top.return_value = items_with_attachment
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
@@ -139,12 +133,11 @@ class TestFuzzyLibrarySearch:
 
         mock_zot = MagicMock()
         mock_zot.items.return_value = []
-        mock_zot.top.return_value = "top_call"
-        mock_zot.everything.return_value = deep_items
+        mock_zot.top.return_value = deep_items
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Deep Learning", limit=3))
-        item_lines = [l for l in result.split("\n") if l.startswith("[")]
+        item_lines = [line for line in result.split("\n") if line.startswith("[")]
         assert len(item_lines) <= 3

@@ -1,8 +1,5 @@
 """Unit tests for fuzzy text matching in annotations."""
 
-import fitz
-import pytest
-
 from zotero_mcp.annotations import _fuzzy_find_in_page, _normalize_text
 
 

@@ -1049,21 +1049,25 @@ wheels = [
 
 [[package]]
 name = "zotero-library-mcp"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
+    { name = "bibtexparser" },
     { name = "fuzzysearch" },
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pymupdf" },
     { name = "pyzotero" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "bibtexparser", specifier = ">=1.4.3,<2" },
     { name = "fuzzysearch", specifier = ">=0.8.1" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.0.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.26.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9.0" },
     { name = "pymupdf", specifier = ">=1.24.0" },
     { name = "pyzotero", specifier = ">=1.5.0" },
 ]
