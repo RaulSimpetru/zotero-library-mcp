@@ -13,6 +13,11 @@ from pathlib import Path
 RESOURCE_TTL_SECONDS = 15 * 60
 MAX_RESOURCES = 32
 
+RESOURCE_URI_HOSTS = {
+    "application/pdf": "pdf",
+    "image/png": "image",
+}
+
 
 @dataclass
 class StoredResource:
@@ -70,14 +75,17 @@ def register_temp_resource(path: str, *, name: str, mime_type: str) -> str:
         mime_type=mime_type,
         expires_at=time.monotonic() + RESOURCE_TTL_SECONDS,
     )
-    return f"zotero://file/{token}"
+    host = RESOURCE_URI_HOSTS.get(mime_type, "file")
+    return f"zotero://{host}/{token}"
 
 
-def read_temp_resource(token: str) -> bytes:
+def read_temp_resource(token: str, *, expected_mime_type: str | None = None) -> bytes:
     """Read a registered resource while enforcing expiry and size limits upstream."""
 
     _cleanup()
     resource = _resources.get(token)
     if resource is None:
         raise ValueError("File resource is missing or has expired")
+    if expected_mime_type and resource.mime_type != expected_mime_type:
+        raise ValueError("File resource does not match the requested media type")
     return resource.path.read_bytes()

@@ -34,6 +34,32 @@ def _filter_top_level(items: list[dict]) -> list[dict]:
     ]
 
 
+def _key_write_access(
+    key_info: dict[str, object],
+    library_type: str,
+    library_id: str,
+) -> bool | None:
+    """Read library write access from Zotero's non-mutating key metadata."""
+
+    access = key_info.get("access")
+    if not isinstance(access, dict):
+        return None
+
+    if library_type.rstrip("s") == "user":
+        user_access = access.get("user")
+        if not isinstance(user_access, dict) or "write" not in user_access:
+            return None
+        return bool(user_access["write"])
+
+    groups_access = access.get("groups")
+    if not isinstance(groups_access, dict):
+        return None
+    group_access = groups_access.get(str(library_id)) or groups_access.get("all")
+    if not isinstance(group_access, dict) or "write" not in group_access:
+        return None
+    return bool(group_access["write"])
+
+
 def _extract_pdf_text(path: str, max_chars: int) -> tuple[str, bool]:
     chunks: list[str] = []
     length = 0
@@ -670,13 +696,29 @@ def register(mcp):
         except Exception as exc:
             return tool_error(f"Zotero health check failed: {exc}")
 
+        try:
+            key_info = await _zot_call(zot.key_info)
+            write_access = _key_write_access(
+                key_info,
+                str(zot.library_type),
+                str(zot.library_id),
+            )
+            write_access_note = (
+                "Derived non-destructively from the Zotero API key permissions."
+                if write_access is not None
+                else "The Zotero API did not report write permission for this library."
+            )
+        except Exception:
+            write_access = None
+            write_access_note = "Could not read API key permissions; no write was attempted."
+
         return {
             "ok": True,
             "library_id": str(zot.library_id),
             "library_type": zot.library_type,
             "read_access": True,
-            "write_access": "not_probed",
-            "write_access_note": "Write access is not mutated during a health check.",
+            "write_access": write_access if write_access is not None else "unknown",
+            "write_access_note": write_access_note,
             "webdav_configured": _use_webdav(),
             "sample_item_available": bool(sample),
         }

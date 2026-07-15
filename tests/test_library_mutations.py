@@ -3,7 +3,7 @@
 import asyncio
 from unittest.mock import MagicMock
 
-from zotero_mcp.library import register
+from zotero_mcp.library import _key_write_access, register
 
 
 def _setup_mcp():
@@ -99,3 +99,42 @@ def test_trash_and_restore_use_deleted_partial_patch(monkeypatch):
     assert zot.client.patch.call_args_list[1].kwargs["json"] == {"deleted": False}
     for call in zot.client.patch.call_args_list:
         assert call.kwargs["headers"] == {"If-Unmodified-Since-Version": "7"}
+
+
+def test_key_write_access_supports_user_and_group_libraries():
+    key_info = {
+        "access": {
+            "user": {"library": True, "write": True},
+            "groups": {
+                "all": {"library": True, "write": False},
+                "456": {"library": True, "write": True},
+            },
+        }
+    }
+
+    assert _key_write_access(key_info, "users", "123") is True
+    assert _key_write_access(key_info, "groups", "456") is True
+    assert _key_write_access(key_info, "group", "789") is False
+    assert _key_write_access({}, "users", "123") is None
+
+
+def test_health_check_reports_write_access_without_mutating(monkeypatch):
+    registered = _setup_mcp()
+    zot = _mock_zotero()
+    zot.items.return_value = []
+    zot.key_info.return_value = {
+        "access": {"user": {"library": True, "write": True}}
+    }
+
+    import zotero_mcp.library as library
+
+    monkeypatch.setattr(library, "_get_zot", lambda: zot)
+    result = asyncio.run(registered["health_check"]())
+
+    assert result["read_access"] is True
+    assert result["write_access"] is True
+    assert "non-destructively" in result["write_access_note"]
+    zot.key_info.assert_called_once_with()
+    zot.create_items.assert_not_called()
+    zot.update_item.assert_not_called()
+    zot.delete_item.assert_not_called()

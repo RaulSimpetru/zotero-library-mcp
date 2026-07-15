@@ -252,6 +252,13 @@ Two path-writing operations were split from their read-only counterparts so remo
 
 Existing read-only calls to `get_bibtex` and `download_pdf` continue to work.
 
+### 0.8.1
+
+- PDF and annotation-preview resources now keep their precise MIME type when read by clients.
+- PDF downloads report progress and return a clear WebDAV timeout error.
+- `health_check` reports API-key write permission without modifying the library.
+- Server instructions are shorter, reducing repeated client context usage.
+
 ## How it works
 
 1. You provide a DOI, arXiv ID, or ISBN

@@ -118,6 +118,25 @@ def test_chatgpt_file_input_schema_is_complete():
     assert set(file_schema["required"]) == {"download_url", "file_id"}
 
 
+def test_download_progress_context_is_not_exposed_as_tool_input():
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+    assert set(tools["download_pdf"].inputSchema["properties"]) == {
+        "item_key",
+        "attachment_key",
+    }
+
+
+def test_file_resource_templates_preserve_media_types():
+    templates = {
+        template.uriTemplate: template.mimeType
+        for template in asyncio.run(mcp.list_resource_templates())
+    }
+
+    assert templates["zotero://pdf/{token}"] == "application/pdf"
+    assert templates["zotero://image/{token}"] == "image/png"
+
+
 def test_high_value_tools_are_registered():
     names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert {

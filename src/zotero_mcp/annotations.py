@@ -10,6 +10,7 @@ from pathlib import Path
 
 import fitz
 from fuzzysearch import find_near_matches
+from mcp.server.fastmcp import Context
 
 from ._helpers import (
     MAX_ATTACHMENT_BYTES,
@@ -550,6 +551,7 @@ def register(mcp):
     @mcp.tool(annotations=READ_ONLY)
     async def download_pdf(
         item_key: str,
+        ctx: Context,
         attachment_key: str | None = None,
     ) -> str:
         """Return a PDF as a remote-safe MCP resource link.
@@ -563,8 +565,16 @@ def register(mcp):
         """
         zot = _get_zot()
 
+        async def report_progress(value: float, message: str) -> None:
+            await ctx.report_progress(value, total=100, message=message)
+
         try:
-            tmp_path, att_key = await _download_pdf(zot, item_key, attachment_key)
+            tmp_path, att_key = await _download_pdf(
+                zot,
+                item_key,
+                attachment_key,
+                progress=report_progress,
+            )
         except Exception as e:
             return tool_error(f"Could not download PDF: {e}")
 
@@ -586,6 +596,7 @@ def register(mcp):
                 name=filename,
                 mime_type="application/pdf",
             )
+            await report_progress(100, "PDF resource is ready")
             return resource_result(
                 f"PDF ready: {filename} ({size / (1024 * 1024):.1f} MB)",
                 uri=uri,

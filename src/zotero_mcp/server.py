@@ -26,13 +26,10 @@ _auth_settings, _token_verifier = build_mcp_auth()
 mcp = FastMCP(
     "zotero",
     instructions=(
-        "Search and manage the user's Zotero library. Before changing an item or "
-        "collection, resolve its real Zotero key with a search or list tool unless "
-        "the user supplied it. Never invent keys. Treat delete_item, "
-        "delete_collection, delete_tags, delete_note, and delete_annotation as "
-        "destructive; prefer trash_item for ordinary item removal. For new "
-        "citations, prefer DOI, then arXiv ID, then ISBN. When an item has multiple "
-        "PDFs, call list_attachments and pass the selected attachment key."
+        "Search and manage Zotero. Resolve real item and collection keys before "
+        "mutations; never invent keys. Prefer trash_item over deletion. For new "
+        "citations prefer DOI, arXiv ID, then ISBN. Use list_attachments before "
+        "choosing among multiple PDFs."
     ),
     website_url="https://github.com/RaulSimpetru/zotero-library-mcp",
     auth=_auth_settings,
@@ -47,9 +44,23 @@ tags.register(mcp)
 annotations.register(mcp)
 
 
+@mcp.resource("zotero://pdf/{token}", mime_type="application/pdf")
+def get_temporary_pdf(token: str) -> bytes:
+    """Read a short-lived PDF returned by a Zotero MCP tool."""
+
+    return read_temp_resource(token, expected_mime_type="application/pdf")
+
+
+@mcp.resource("zotero://image/{token}", mime_type="image/png")
+def get_temporary_image(token: str) -> bytes:
+    """Read a short-lived PNG preview returned by a Zotero MCP tool."""
+
+    return read_temp_resource(token, expected_mime_type="image/png")
+
+
 @mcp.resource("zotero://file/{token}", mime_type="application/octet-stream")
 def get_temporary_file(token: str) -> bytes:
-    """Read a short-lived file returned by a Zotero MCP tool."""
+    """Read another short-lived file returned by a Zotero MCP tool."""
 
     return read_temp_resource(token)
 

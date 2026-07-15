@@ -10,6 +10,7 @@ import socket
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,9 @@ MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB limit for PDF downloads
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 MAX_WEBDAV_ZIP_BYTES = 110 * 1024 * 1024
 MAX_REDIRECTS = 5
+PDF_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+
+DownloadProgress = Callable[[float, str], Awaitable[None]]
 
 UNPAYWALL_API = "https://api.unpaywall.org/v2"
 
@@ -478,12 +482,18 @@ async def _download_pdf(
     zot: zotero.Zotero,
     item_key: str,
     attachment_key: str | None = None,
+    progress: DownloadProgress | None = None,
 ) -> tuple[str, str]:
     """Download the PDF attachment for an item to a temp file.
 
     Returns (tmp_path, attachment_key). Caller must delete tmp_path.
     Raises ValueError if no PDF attachment found.
     """
+    async def report(value: float, message: str) -> None:
+        if progress is not None:
+            await progress(value, message)
+
+    await report(2, "Resolving the PDF attachment")
     children = await _zot_call(zot.children, item_key)
     att_key = attachment_key
     matching_keys = []
@@ -506,20 +516,40 @@ async def _download_pdf(
         zip_path = None
         pdf_path = None
         try:
-            async with httpx.AsyncClient(timeout=60, auth=auth) as client:
+            await report(5, "Connecting to WebDAV")
+            timeout = httpx.Timeout(
+                PDF_DOWNLOAD_TIMEOUT_SECONDS,
+                connect=min(15.0, PDF_DOWNLOAD_TIMEOUT_SECONDS),
+            )
+            async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
                 async with client.stream("GET", f"{webdav_url}/{att_key}.zip") as resp:
                     resp.raise_for_status()
                     content_length = resp.headers.get("content-length")
-                    if content_length and int(content_length) > MAX_WEBDAV_ZIP_BYTES:
+                    expected_bytes = int(content_length) if content_length else None
+                    if expected_bytes and expected_bytes > MAX_WEBDAV_ZIP_BYTES:
                         raise ValueError("WebDAV ZIP exceeds the download limit")
                     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
                         zip_path = tmp.name
                         downloaded = 0
+                        last_progress = 5.0
+                        last_reported_bytes = 0
                         async for chunk in resp.aiter_bytes(64 * 1024):
                             downloaded += len(chunk)
                             if downloaded > MAX_WEBDAV_ZIP_BYTES:
                                 raise ValueError("WebDAV ZIP exceeds the download limit")
                             tmp.write(chunk)
+                            if expected_bytes:
+                                current = min(75.0, 5.0 + (downloaded / expected_bytes) * 70.0)
+                                if current - last_progress >= 5:
+                                    last_progress = current
+                                    await report(current, "Downloading the PDF from WebDAV")
+                            elif downloaded - last_reported_bytes >= 5 * 1024 * 1024:
+                                last_reported_bytes = downloaded
+                                await report(
+                                    40,
+                                    f"Downloaded {downloaded / (1024 * 1024):.0f} MB from WebDAV",
+                                )
+            await report(78, "Validating the WebDAV archive")
             with zipfile.ZipFile(zip_path, "r") as zf:
                 pdf_infos = [info for info in zf.infolist() if info.filename.lower().endswith(".pdf")]
                 if not pdf_infos:
@@ -535,15 +565,27 @@ async def _download_pdf(
                     pdf_path = output.name
                     with zf.open(info) as source:
                         copied = 0
+                        last_progress = 78.0
                         while chunk := source.read(64 * 1024):
                             copied += len(chunk)
                             if copied > MAX_PDF_BYTES:
                                 raise ValueError("Extracted PDF exceeds the size limit")
                             output.write(chunk)
+                            if info.file_size:
+                                current = min(96.0, 78.0 + (copied / info.file_size) * 18.0)
+                                if current - last_progress >= 5:
+                                    last_progress = current
+                                    await report(current, "Extracting the PDF")
             with open(pdf_path, "rb") as input_file:
                 if input_file.read(5) != b"%PDF-":
                     raise ValueError("WebDAV attachment is not a valid PDF")
+            await report(98, "PDF downloaded and validated")
             return pdf_path, att_key
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                f"WebDAV PDF download timed out after "
+                f"{PDF_DOWNLOAD_TIMEOUT_SECONDS:.0f} seconds; retry or check the WebDAV connection"
+            ) from exc
         except Exception:
             if pdf_path:
                 Path(pdf_path).unlink(missing_ok=True)
@@ -552,6 +594,7 @@ async def _download_pdf(
             if zip_path:
                 Path(zip_path).unlink(missing_ok=True)
     else:
+        await report(10, "Downloading the PDF from Zotero storage")
         file_data = await _zot_call(zot.file, att_key)
         if len(file_data) > MAX_PDF_BYTES:
             raise ValueError("PDF attachment exceeds the size limit")
@@ -559,6 +602,7 @@ async def _download_pdf(
             raise ValueError("Attachment content is not a valid PDF")
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(file_data)
+            await report(98, "PDF downloaded and validated")
             return tmp.name, att_key
 
 

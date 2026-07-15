@@ -105,9 +105,12 @@ def test_temporary_resource_uses_opaque_uri_and_reads_bytes(tmp_path):
     )
     token = uri.rsplit("/", 1)[-1]
 
-    assert uri.startswith("zotero://file/")
+    assert uri.startswith("zotero://pdf/")
     assert "paper.pdf" not in uri
-    assert read_temp_resource(token) == b"%PDF-resource"
+    assert read_temp_resource(token, expected_mime_type="application/pdf") == b"%PDF-resource"
+
+    with pytest.raises(ValueError, match="media type"):
+        read_temp_resource(token, expected_mime_type="image/png")
 
 
 def test_resource_result_validates_with_string_tool_schema(tmp_path):
