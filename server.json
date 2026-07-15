@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.RaulSimpetru/zotero-library-mcp",
-  "description": "Add papers and books to Zotero by DOI, arXiv ID, or ISBN and manage your library",
+  "description": "Search, read, annotate, and manage a Zotero library from MCP clients",
   "repository": {
     "url": "https://github.com/RaulSimpetru/zotero-library-mcp",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.8.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "zotero-library-mcp",
-      "version": "0.6.0",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       },
@@ -29,6 +29,20 @@
           "format": "string",
           "isSecret": true,
           "name": "ZOTERO_API_KEY"
+        },
+        {
+          "description": "Library type: user (default) or group",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "ZOTERO_LIBRARY_TYPE"
+        },
+        {
+          "description": "Contact email for CrossRef and Unpaywall API etiquette",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "CROSSREF_MAILTO"
         },
         {
           "description": "WebDAV URL for file storage (if using WebDAV sync)",

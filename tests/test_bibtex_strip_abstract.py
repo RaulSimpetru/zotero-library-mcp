@@ -4,8 +4,6 @@ import asyncio
 from unittest.mock import MagicMock
 
 import bibtexparser
-import pytest
-
 from zotero_mcp.library import register
 
 
@@ -13,7 +11,7 @@ def _setup_mcp():
     mcp = MagicMock()
     registered = {}
 
-    def tool_decorator():
+    def tool_decorator(**_kwargs):
         def wrapper(fn):
             registered[fn.__name__] = fn
             return fn

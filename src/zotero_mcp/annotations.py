@@ -1,22 +1,45 @@
 """Tools for notes, annotations, and file attachments."""
 
 import json
+import mimetypes
 import os
 import re
+import shutil
 import tempfile
+from pathlib import Path
+
 import fitz
 from fuzzysearch import find_near_matches
 
 from ._helpers import (
+    MAX_ATTACHMENT_BYTES,
+    _attach_file_local,
     _download_pdf,
+    _download_file_from_url,
     _get_zot,
     _use_webdav,
     _attach_file_webdav,
+    _validate_limit,
+    _zot_call,
 )
+from .file_resources import register_temp_resource
+from .responses import resource_result, tool_error
+from .runtime import OpenAIFile, validate_server_path
+from .tool_annotations import DESTRUCTIVE, READ_ONLY, WRITE
 
 
 HIGHLIGHT_COLORS = ["#ffd400", "#ff6666", "#5fb236", "#2ea8e5", "#a28ae5"]
 DEFAULT_HIGHLIGHT_COLOR = "#ffd400"
+
+
+def _validate_hex_color(color: str) -> str:
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ValueError("color must be a six-digit hex value such as #FFD400")
+    return color.lower()
+
+
+def _color_tuple(color: str) -> tuple[float, float, float]:
+    return tuple(int(color[index:index + 2], 16) / 255 for index in (1, 3, 5))
 
 
 def _normalize_text(t: str) -> str:
@@ -69,7 +92,7 @@ def _fuzzy_find_in_page(words, word_texts, search_norm, max_l_dist=None):
 
 
 def register(mcp):
-    @mcp.tool()
+    @mcp.tool(annotations=WRITE)
     async def add_note(item_key: str, note: str) -> str:
         """Add a note to a Zotero item.
 
@@ -80,37 +103,42 @@ def register(mcp):
             item_key: The parent Zotero item key to attach the note to
             note: The note content (plain text or HTML)
         """
+        if not note.strip():
+            return tool_error("note must not be empty")
         zot = _get_zot()
 
         try:
-            zot.item(item_key)
+            await _zot_call(zot.item, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            return tool_error(f"Could not find item {item_key}: {e}")
 
-        template = zot.item_template("note")
+        template = await _zot_call(zot.item_template, "note")
         template["note"] = note
 
         try:
-            result = zot.create_items([template], parentid=item_key)
+            result = await _zot_call(zot.create_items, [template], parentid=item_key)
         except Exception as e:
-            return f"Failed to create note: {e}"
+            return tool_error(f"Failed to create note: {e}")
 
         if result.get("successful"):
             created = list(result["successful"].values())[0]
             note_key = created.get("key", "unknown")
             return f"Added note [{note_key}] to item {item_key}"
         elif result.get("failed"):
-            return f"Rejected: {list(result['failed'].values())}"
+            return tool_error(f"Rejected: {list(result['failed'].values())}")
         else:
-            return f"Unexpected: {result}"
+            return tool_error(f"Unexpected response from Zotero: {result}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=WRITE)
     async def create_annotation(
         item_key: str,
         quoted_text: str,
         comment: str = "",
         color: str = DEFAULT_HIGHLIGHT_COLOR,
         max_l_dist: int | None = None,
+        attachment_key: str | None = None,
+        page_number: int | None = None,
+        occurrence: int = 1,
     ) -> str:
         """Highlight a text passage in a PDF attached to a Zotero item.
 
@@ -135,20 +163,39 @@ def register(mcp):
             max_l_dist: Maximum Levenshtein distance for fuzzy matching. Default
                         is ~20% of the search text length. Increase if the PDF
                         has many OCR errors; decrease for stricter matching.
+            attachment_key: Optional PDF attachment key when the item has multiple PDFs
+            page_number: Optional one-based page number to search
+            occurrence: One-based occurrence to highlight when text repeats
         """
-        zot = _get_zot()
+        try:
+            quoted_text = quoted_text.strip()
+            if len(quoted_text) < 3:
+                raise ValueError("quoted_text must contain at least 3 characters")
+            if len(quoted_text) > 10000:
+                raise ValueError("quoted_text must not exceed 10,000 characters")
+            color = _validate_hex_color(color)
+            if max_l_dist is not None and not 0 <= max_l_dist <= len(quoted_text):
+                raise ValueError("max_l_dist must be between 0 and the quoted text length")
+            if page_number is not None and page_number < 1:
+                raise ValueError("page_number must be at least 1")
+            if occurrence < 1:
+                raise ValueError("occurrence must be at least 1")
+            zot = _get_zot()
+        except Exception as exc:
+            return tool_error(f"Invalid annotation request: {exc}")
         tmp_path = None
+        doc = None
 
         try:
-            tmp_path, att_key = await _download_pdf(zot, item_key)
+            tmp_path, att_key = await _download_pdf(zot, item_key, attachment_key)
         except Exception as e:
-            return f"Could not download PDF: {e}"
+            return tool_error(f"Could not download PDF: {e}")
 
         try:
             # --- Overlap detection against existing highlights ---
             existing_anns = []
             try:
-                att_children = zot.children(att_key)
+                att_children = await _zot_call(zot.children, att_key)
                 for ann in att_children:
                     d = ann.get("data", {})
                     if d.get("itemType") == "annotation" and d.get("annotationType") == "highlight":
@@ -166,12 +213,17 @@ def register(mcp):
                     old_comment = ann.get("annotationComment", "")
                     separator = "\n---\n" if old_comment else ""
                     new_full_comment = old_comment + separator + comment
-                    zot.update_item({
-                        "key": ann_key,
-                        "version": ann_version,
-                        "annotationComment": new_full_comment,
-                    })
-                    return f"Updated existing highlight [{ann_key}]: appended comment"
+                    if comment:
+                        await _zot_call(
+                            zot.update_item,
+                            {
+                                "key": ann_key,
+                                "version": ann_version,
+                                "annotationComment": new_full_comment,
+                            },
+                        )
+                        return f"Updated existing highlight [{ann_key}]: appended comment"
+                    return f"Highlight [{ann_key}] already exists; no duplicate created"
 
                 elif normalized_new in existing_text:
                     if color == DEFAULT_HIGHLIGHT_COLOR:
@@ -180,47 +232,52 @@ def register(mcp):
                     break
 
                 elif existing_text in normalized_new:
-                    ann_key = ann.get("key")
-                    ann_version = ann.get("version")
-                    old_comment = ann.get("annotationComment", "")
-                    separator = "\n---\n" if old_comment else ""
-                    new_full_comment = old_comment + separator + comment
-                    zot.update_item({
-                        "key": ann_key,
-                        "version": ann_version,
-                        "annotationComment": new_full_comment,
-                    })
-                    return f"Updated existing highlight [{ann_key}]: appended comment (broader passage)"
+                    if color == DEFAULT_HIGHLIGHT_COLOR:
+                        existing_color = ann.get("annotationColor", DEFAULT_HIGHLIGHT_COLOR)
+                        color = next(
+                            (candidate for candidate in HIGHLIGHT_COLORS if candidate != existing_color),
+                            "#ff6666",
+                        )
+                    break
 
             doc = fitz.open(tmp_path)
+            if page_number is not None and page_number > doc.page_count:
+                return tool_error(
+                    f"page_number {page_number} exceeds the PDF's {doc.page_count} pages"
+                )
             found_rects = []
             found_page = None
 
             search_norm = _normalize_text(quoted_text).lower()
 
             # Strategy 1: PyMuPDF's built-in search
-            for page in doc:
+            pages = [doc[page_number - 1]] if page_number is not None else list(doc)
+            remaining_occurrence = occurrence
+            for page in pages:
                 rects = page.search_for(quoted_text)
                 if rects:
-                    first_match = [rects[0]]
-                    for r in rects[1:]:
-                        if abs(r.y0 - first_match[-1].y0) < 20:
-                            first_match.append(r)
-                        else:
-                            break
-                    found_rects = first_match
+                    if remaining_occurrence > len(rects):
+                        remaining_occurrence -= len(rects)
+                        continue
+                    found_rects = [rects[remaining_occurrence - 1]]
                     found_page = page
                     break
 
             # Strategy 2: word-based search with normalization
             if not found_rects:
-                for page in doc:
+                for page in pages:
                     words = page.get_text("words")
                     if not words:
                         continue
                     word_texts = [_normalize_text(w[4]) for w in words]
                     full_text = " ".join(word_texts).lower()
-                    pos = full_text.find(search_norm)
+                    pos = -1
+                    start = 0
+                    for _ in range(occurrence):
+                        pos = full_text.find(search_norm, start)
+                        if pos < 0:
+                            break
+                        start = pos + max(1, len(search_norm))
                     if pos < 0:
                         continue
                     char_count = 0
@@ -243,7 +300,7 @@ def register(mcp):
                 best_rects = None
                 best_text = None
                 best_dist = None
-                for page in doc:
+                for page in pages:
                     words = page.get_text("words")
                     if not words:
                         continue
@@ -262,8 +319,7 @@ def register(mcp):
                     fuzzy_matched_text = best_text
 
             if not found_rects or found_page is None:
-                doc.close()
-                return f"Text not found in PDF: \"{quoted_text[:80]}...\""
+                return tool_error(f"Text not found in PDF: \"{quoted_text[:80]}...\"")
 
             page_index = found_page.number
             page_label = str(page_index + 1)
@@ -282,6 +338,7 @@ def register(mcp):
             sort_index = f"{page_index:05d}|000000|{y_pos:05d}"
 
             doc.close()
+            doc = None
 
             # Use the actual matched text from the PDF when fuzzy-matched
             annotation_text = fuzzy_matched_text if fuzzy_matched_text else quoted_text
@@ -302,7 +359,7 @@ def register(mcp):
                 "tags": [],
             }
 
-            result = zot.create_items([annotation], parentid=att_key)
+            result = await _zot_call(zot.create_items, [annotation], parentid=att_key)
 
             if result.get("successful"):
                 created = list(result["successful"].values())[0]
@@ -310,17 +367,21 @@ def register(mcp):
 
                 preview_path = ""
                 try:
-                    preview_doc = fitz.open(tmp_path)
-                    preview_page = preview_doc[page_index]
-                    for r in found_rects:
-                        highlight = preview_page.add_highlight_annot(r)
-                        highlight.set_colors(stroke=fitz.utils.getColor("yellow"))
-                        highlight.update()
-                    pix = preview_page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                    preview_path = tempfile.mktemp(suffix=".png", prefix="zotero_annot_")
+                    with fitz.open(tmp_path) as preview_doc:
+                        preview_page = preview_doc[page_index]
+                        for r in found_rects:
+                            highlight = preview_page.add_highlight_annot(r)
+                            highlight.set_colors(stroke=_color_tuple(color))
+                            highlight.update()
+                        pix = preview_page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".png", prefix="zotero_annot_", delete=False
+                    ) as preview_file:
+                        preview_path = preview_file.name
                     pix.save(preview_path)
-                    preview_doc.close()
                 except Exception:
+                    if preview_path:
+                        Path(preview_path).unlink(missing_ok=True)
                     preview_path = ""
 
                 if fuzzy_matched_text:
@@ -328,33 +389,52 @@ def register(mcp):
                 else:
                     msg = f"Created highlight [{ann_key}] on page {page_label}: \"{quoted_text[:60]}...\""
                 if preview_path:
-                    msg += f"\n\nPreview image saved to: {preview_path}"
-                    msg += "\nOpen or read this image to visually verify the highlight placement."
+                    try:
+                        uri = register_temp_resource(
+                            preview_path,
+                            name=f"annotation-{ann_key}.png",
+                            mime_type="image/png",
+                        )
+                    except Exception as exc:
+                        Path(preview_path).unlink(missing_ok=True)
+                        return f"{msg}\nPreview unavailable: {exc}"
+                    return resource_result(
+                        msg,
+                        uri=uri,
+                        name=f"annotation-{ann_key}.png",
+                        mime_type="image/png",
+                        size=os.path.getsize(preview_path),
+                        annotation_key=ann_key,
+                        page=page_label,
+                    )
                 return msg
             elif result.get("failed"):
-                return f"Rejected: {list(result['failed'].values())}"
+                return tool_error(f"Rejected: {list(result['failed'].values())}")
             else:
-                return f"Unexpected: {result}"
+                return tool_error(f"Unexpected response from Zotero: {result}")
 
         except Exception as e:
-            return f"Failed to create annotation: {e}"
+            return tool_error(f"Failed to create annotation: {e}")
         finally:
+            if doc is not None:
+                doc.close()
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    @mcp.tool()
-    async def get_annotations(item_key: str) -> str:
+    @mcp.tool(annotations=READ_ONLY)
+    async def get_annotations(item_key: str, limit: int = 100) -> str:
         """List all highlights and annotations on a paper's PDF.
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
+            limit: Maximum number of annotations to return (default 100)
         """
-        zot = _get_zot()
-
         try:
-            children = zot.children(item_key)
+            limit = _validate_limit(limit, maximum=500)
+            zot = _get_zot()
+            children = await _zot_call(zot.children, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            return tool_error(f"Could not find item {item_key}: {e}")
 
         annotations = []
         for child in children:
@@ -364,7 +444,7 @@ def register(mcp):
                 if not att_key:
                     continue
                 try:
-                    att_children = zot.children(att_key)
+                    att_children = await _zot_call(zot.children, att_key)
                 except Exception:
                     continue
                 for ann in att_children:
@@ -382,78 +462,272 @@ def register(mcp):
                     if text:
                         line += f": \"{text[:100]}\""
                     if comment:
-                        line += f" — {comment}"
+                        line += f" — {comment[:500]}"
                     annotations.append(line)
+                    if len(annotations) >= limit:
+                        break
+            if len(annotations) >= limit:
+                break
 
         if not annotations:
             return "No annotations found for this item."
 
-        return f"{len(annotations)} annotations:\n" + "\n".join(annotations)
+        return f"Annotations (showing {len(annotations)}):\n" + "\n".join(annotations)
 
-    @mcp.tool()
-    async def attach_file(item_key: str, file_path: str) -> str:
-        """Attach a local file (e.g. PDF) to an existing Zotero item.
+    @mcp.tool(annotations=WRITE, meta={"openai/fileParams": ["file"]})
+    async def attach_file(
+        item_key: str,
+        file: OpenAIFile | None = None,
+        file_path: str | None = None,
+    ) -> str:
+        """Attach a ChatGPT file input or an authorized local file to an item.
 
         Args:
             item_key: The Zotero item key to attach the file to
-            file_path: Absolute path to the file on your local machine
+            file: File object supplied by ChatGPT through openai/fileParams
+            file_path: Local server path; stdio only unless HTTP roots are explicitly enabled
         """
-        if not os.path.isfile(file_path):
-            return f"File not found: {file_path}"
+        if (file is None) == (file_path is None):
+            return tool_error("Provide exactly one of file or file_path")
+
+        tmp_path = None
+        temp_dir = None
+        try:
+            if file is not None:
+                extension = mimetypes.guess_extension(file.mime_type or "") or ""
+                safe_name = os.path.basename(file.file_name or f"attachment{extension}")
+                suffix = Path(safe_name).suffix[:16]
+                tmp_path, _ = await _download_file_from_url(
+                    file.download_url,
+                    suffix=suffix,
+                    max_bytes=MAX_ATTACHMENT_BYTES,
+                )
+                temp_dir = tempfile.mkdtemp(prefix="zotero_upload_")
+                source_path = str(Path(temp_dir) / safe_name)
+                os.replace(tmp_path, source_path)
+                tmp_path = None
+                filename = safe_name
+            else:
+                source = validate_server_path(file_path or "")
+                if not source.is_file():
+                    return tool_error(f"File not found: {source}")
+                if source.stat().st_size > MAX_ATTACHMENT_BYTES:
+                    return tool_error("Attachment exceeds the 100 MB size limit")
+                source_path = str(source)
+                filename = source.name
+        except Exception as exc:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            elif tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+            return tool_error(f"Could not read attachment input: {exc}")
 
         zot = _get_zot()
 
         try:
-            zot.item(item_key)
+            await _zot_call(zot.item, item_key)
         except Exception as e:
-            return f"Could not find item {item_key}: {e}"
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return tool_error(f"Could not find item {item_key}: {e}")
 
-        filename = os.path.basename(file_path)
-
-        if _use_webdav():
-            result = await _attach_file_webdav(zot, item_key, file_path)
-            if result:
-                return f"Attached '{filename}' to item {item_key} (via WebDAV)"
-            return f"Failed to attach file via WebDAV"
-        else:
-            try:
-                zot.attachment_simple([file_path], item_key)
-            except Exception as e:
-                return f"Failed to attach file: {e}"
+        try:
+            if _use_webdav():
+                result = await _attach_file_webdav(zot, item_key, source_path)
+                if result:
+                    return f"Attached '{filename}' to item {item_key} (via WebDAV)"
+                return tool_error("Failed to attach file via WebDAV")
+            result = await _attach_file_local(zot, item_key, source_path)
+            if not result:
+                return tool_error("Failed to attach file to Zotero storage")
             return f"Attached '{filename}' to item {item_key}"
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            elif tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
 
-    @mcp.tool()
-    async def download_pdf(item_key: str, save_path: str) -> str:
-        """Download the PDF attachment of a Zotero item to a local file.
+    @mcp.tool(annotations=READ_ONLY)
+    async def download_pdf(
+        item_key: str,
+        attachment_key: str | None = None,
+    ) -> str:
+        """Return a PDF as a remote-safe MCP resource link.
 
         Useful when Zotero's fulltext index is incomplete (e.g. for books)
         and you need to read the PDF directly with other tools.
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
-            save_path: Local file path to save the PDF to (e.g. "/tmp/paper.pdf")
+            attachment_key: Optional PDF attachment key when the item has multiple PDFs
         """
         zot = _get_zot()
 
         try:
-            tmp_path, att_key = await _download_pdf(zot, item_key)
+            tmp_path, att_key = await _download_pdf(zot, item_key, attachment_key)
         except Exception as e:
-            return f"Could not download PDF: {e}"
+            return tool_error(f"Could not download PDF: {e}")
 
         try:
-            dest = os.path.expanduser(save_path)
-            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-            os.rename(tmp_path, dest)
-            size_mb = os.path.getsize(dest) / (1024 * 1024)
-            return f"Saved PDF to {dest} ({size_mb:.1f} MB)"
-        except OSError:
-            import shutil
-            try:
-                shutil.move(tmp_path, dest)
-                size_mb = os.path.getsize(dest) / (1024 * 1024)
-                return f"Saved PDF to {dest} ({size_mb:.1f} MB)"
-            except Exception as e:
-                return f"Failed to save PDF: {e}"
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+            attachment = await _zot_call(zot.item, att_key)
+            attachment_data = attachment.get("data", {})
+            filename = os.path.basename(
+                attachment_data.get("filename") or attachment_data.get("title") or f"{item_key}.pdf"
+            )
+            if not filename.lower().endswith(".pdf"):
+                filename += ".pdf"
+        except Exception:
+            filename = f"{item_key}.pdf"
+
+        try:
+            size = os.path.getsize(tmp_path)
+            uri = register_temp_resource(
+                tmp_path,
+                name=filename,
+                mime_type="application/pdf",
+            )
+            return resource_result(
+                f"PDF ready: {filename} ({size / (1024 * 1024):.1f} MB)",
+                uri=uri,
+                name=filename,
+                mime_type="application/pdf",
+                size=size,
+                item_key=item_key,
+                attachment_key=att_key,
+            )
+        except Exception as exc:
+            Path(tmp_path).unlink(missing_ok=True)
+            return tool_error(f"Could not expose PDF resource: {exc}")
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def save_pdf(
+        item_key: str,
+        save_path: str,
+        attachment_key: str | None = None,
+    ) -> str:
+        """Save a Zotero PDF to an authorized local server path."""
+
+        zot = _get_zot()
+        try:
+            tmp_path, _ = await _download_pdf(zot, item_key, attachment_key)
+        except Exception as exc:
+            return tool_error(f"Could not download PDF: {exc}")
+
+        staging: Path | None = None
+        try:
+            destination = validate_server_path(save_path, for_write=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+            shutil.copy2(tmp_path, staging)
+            os.replace(staging, destination)
+            staging = None
+            size_mb = destination.stat().st_size / (1024 * 1024)
+            return f"Saved PDF to {destination} ({size_mb:.1f} MB)"
+        except Exception as e:
+            return tool_error(f"Failed to save PDF: {e}")
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def list_notes(item_key: str, limit: int = 50) -> dict[str, object]:
+        """List child notes for an item with bounded note content."""
+
+        try:
+            limit = _validate_limit(limit, maximum=200)
+            zot = _get_zot()
+            children = await _zot_call(zot.children, item_key)
+        except Exception as exc:
+            return tool_error(f"Could not list notes for {item_key}: {exc}")
+
+        notes = []
+        for child in children:
+            data = child.get("data", {})
+            if data.get("itemType") != "note":
+                continue
+            content = data.get("note", "")
+            notes.append(
+                {
+                    "key": data.get("key", ""),
+                    "note": content[:2000],
+                    "truncated": len(content) > 2000,
+                    "date_modified": data.get("dateModified", ""),
+                }
+            )
+            if len(notes) >= limit:
+                break
+        return {"item_key": item_key, "count": len(notes), "notes": notes}
+
+    @mcp.tool(annotations=WRITE)
+    async def update_note(note_key: str, note: str) -> str:
+        """Replace the content of an existing Zotero note."""
+
+        if not note.strip():
+            return tool_error("note must not be empty")
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, note_key)
+            data = item.get("data", {})
+            if data.get("itemType") != "note":
+                return tool_error(f"Item {note_key} is not a note")
+            data["note"] = note
+            await _zot_call(zot.update_item, data)
+            return f"Updated note [{note_key}]"
+        except Exception as exc:
+            return tool_error(f"Failed to update note: {exc}")
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def delete_note(note_key: str) -> str:
+        """Permanently delete a Zotero note."""
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, note_key)
+            if item.get("data", {}).get("itemType") != "note":
+                return tool_error(f"Item {note_key} is not a note")
+            await _zot_call(zot.delete_item, item)
+            return f"Deleted note [{note_key}]"
+        except Exception as exc:
+            return tool_error(f"Failed to delete note: {exc}")
+
+    @mcp.tool(annotations=WRITE)
+    async def update_annotation(
+        annotation_key: str,
+        comment: str | None = None,
+        color: str | None = None,
+    ) -> str:
+        """Update the comment and/or highlight color of an annotation."""
+
+        if comment is None and color is None:
+            return tool_error("Provide comment and/or color")
+        try:
+            if color is not None:
+                color = _validate_hex_color(color)
+            zot = _get_zot()
+            item = await _zot_call(zot.item, annotation_key)
+            data = item.get("data", {})
+            if data.get("itemType") != "annotation":
+                return tool_error(f"Item {annotation_key} is not an annotation")
+            if comment is not None:
+                data["annotationComment"] = comment
+            if color is not None:
+                data["annotationColor"] = color
+            await _zot_call(zot.update_item, data)
+            return f"Updated annotation [{annotation_key}]"
+        except Exception as exc:
+            return tool_error(f"Failed to update annotation: {exc}")
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def delete_annotation(annotation_key: str) -> str:
+        """Permanently delete a Zotero annotation."""
+
+        try:
+            zot = _get_zot()
+            item = await _zot_call(zot.item, annotation_key)
+            if item.get("data", {}).get("itemType") != "annotation":
+                return tool_error(f"Item {annotation_key} is not an annotation")
+            await _zot_call(zot.delete_item, item)
+            return f"Deleted annotation [{annotation_key}]"
+        except Exception as exc:
+            return tool_error(f"Failed to delete annotation: {exc}")
