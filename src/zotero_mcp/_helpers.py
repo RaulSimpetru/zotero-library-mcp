@@ -108,6 +108,31 @@ def _validate_limit(limit: int, *, maximum: int = 100) -> int:
     return limit
 
 
+def _validate_start(start: int) -> int:
+    if not isinstance(start, int) or isinstance(start, bool) or start < 0:
+        raise ValueError("start must be a non-negative integer")
+    return start
+
+
+def _total_results(zot, fallback: int) -> int:
+    """Total-Results header from the client's last request, or fallback."""
+    try:
+        value = zot.request.headers.get("Total-Results")
+    except AttributeError:
+        return fallback
+    return int(value) if isinstance(value, str) and value.isdigit() else fallback
+
+
+def _page_footer(start: int, shown: int, total: int) -> str:
+    if shown:
+        footer = f"\n\nShowing items {start + 1}–{start + shown} of {total}."
+    else:
+        footer = f"\n\nNo items at start={start}; {total} total."
+    if start + shown < total:
+        footer += f" Pass start={start + shown} to get the next page."
+    return footer
+
+
 async def _download_file_from_url(
     url: str,
     *,

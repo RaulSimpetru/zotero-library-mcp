@@ -16,9 +16,12 @@ from ._helpers import (
     _download_pdf,
     _fmt_item,
     _get_zot,
+    _page_footer,
     _resolve_doi,
+    _total_results,
     _use_webdav,
     _validate_limit,
+    _validate_start,
     _zot_call,
 )
 from .responses import tool_error
@@ -181,7 +184,7 @@ def register(mcp):
         suffix = " (scan capped at 5,000 items)" if start >= 5000 else ""
         return f"Unfiled items (showing {len(lines)}){suffix}:\n" + "\n".join(lines)
 
-    def _rank_fuzzy_items(all_items: list[dict], query: str, limit: int) -> list[dict]:
+    def _rank_fuzzy_items(all_items: list[dict], query: str) -> list[dict]:
         """Fuzzy-match query against a bounded set of item titles, authors, and tags."""
         query_norm = re.sub(r"\s+", " ", query.strip().lower())
         if not query_norm:
@@ -210,41 +213,54 @@ def register(mcp):
                 scored.append((best_dist, data))
 
         scored.sort(key=lambda x: x[0])
-        return [data for _, data in scored[:limit]]
+        return [data for _, data in scored]
 
     @mcp.tool(annotations=READ_ONLY)
-    async def search_library(query: str, limit: int = 10) -> str:
+    async def search_library(query: str, limit: int = 10, start: int = 0) -> str:
         """Search your Zotero library. Falls back to fuzzy matching if the
         exact search returns no results.
 
         Args:
             query: Search query (searches titles, authors, tags, etc.)
-            limit: Maximum number of results (default 10)
+            limit: Maximum number of results per page (default 10, max 100)
+            start: Offset of the first result; pass the value suggested by the
+                previous call's footer to fetch the next page (default 0)
         """
         try:
-            limit = _validate_limit(limit, maximum=50)
+            limit = _validate_limit(limit, maximum=100)
+            start = _validate_start(start)
             if not query.strip():
                 return tool_error("query must not be empty")
             zot = _get_zot()
-            results = await _zot_call(zot.items, q=query.strip(), limit=limit)
+            results = await _zot_call(zot.items, q=query.strip(), limit=limit, start=start)
         except Exception as exc:
             return tool_error(f"Could not search the Zotero library: {exc}")
 
+        total = _total_results(zot, start + len(results))
         if results:
             lines = [_fmt_item(item.get("data", {})) for item in results]
-            return "\n".join(lines)
+            return "\n".join(lines) + _page_footer(start, len(results), total)
+        if total:
+            return "No more results." + _page_footer(start, 0, total)
 
         # Fuzzy fallback
         try:
             top_query = await _top_items_bounded(zot, 1000)
-            fuzzy_results = _rank_fuzzy_items(top_query, query, limit)
+            ranked = _rank_fuzzy_items(top_query, query)
         except Exception as exc:
             return tool_error(f"Exact search returned no results and fuzzy search failed: {exc}")
-        if not fuzzy_results:
+        fuzzy_results = ranked[start : start + limit]
+        if not ranked:
             return "No results."
+        if not fuzzy_results:
+            return "No more results." + _page_footer(start, 0, len(ranked))
 
         lines = [_fmt_item(item) for item in fuzzy_results]
-        return "No exact matches — fuzzy results:\n" + "\n".join(lines)
+        return (
+            "No exact matches — fuzzy results:\n"
+            + "\n".join(lines)
+            + _page_footer(start, len(fuzzy_results), len(ranked))
+        )
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_item_details(item_key: str) -> str:

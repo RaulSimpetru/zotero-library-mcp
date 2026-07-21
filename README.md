@@ -22,7 +22,7 @@ The server supports both MCP transports used by these clients:
 
 ### Searching & browsing
 
-- **`search_library`** — Search your Zotero library by title, author, tag, etc. (falls back to fuzzy matching when the exact search returns no results)
+- **`search_library`** — Search your Zotero library by title, author, tag, etc., paginated via `start`/`limit` (falls back to fuzzy matching when the exact search returns no results)
 - **`get_item_details`** — View full metadata for any item
 - **`get_recent_items`** — List recently added items
 - **`get_unfiled_items`** — Get items not in any collection
@@ -52,7 +52,7 @@ The server supports both MCP transports used by these clients:
 
 - **`list_collections`** — List all collections (with nesting)
 - **`create_collection`** — Create a new collection (optionally nested under a parent)
-- **`get_collection_items`** — Browse items in a collection
+- **`get_collection_items`** — Browse items in a collection, paginated via `start`/`limit`
 - **`add_to_collection`** — Add an existing item to a collection
 - **`remove_from_collection`** — Remove an item from a collection (keeps it in your library)
 - **`rename_collection`**, **`move_collection`** — Reorganize collections

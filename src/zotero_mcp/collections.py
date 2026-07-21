@@ -2,7 +2,15 @@
 
 from collections import defaultdict
 
-from ._helpers import _fmt_item, _get_zot, _validate_limit, _zot_call
+from ._helpers import (
+    _fmt_item,
+    _get_zot,
+    _page_footer,
+    _total_results,
+    _validate_limit,
+    _validate_start,
+    _zot_call,
+)
 from .responses import tool_error
 from .tool_annotations import DESTRUCTIVE, READ_ONLY, WRITE
 
@@ -215,51 +223,43 @@ def register(mcp):
         return f"Deleted collection [{collection_id}] {name}"
 
     @mcp.tool(annotations=READ_ONLY)
-    async def get_collection_items(collection_id: str, limit: int = 25) -> str:
-        """Get all items in a specific collection.
+    async def get_collection_items(collection_id: str, limit: int = 25, start: int = 0) -> str:
+        """Get items in a specific collection, one page at a time.
 
         Args:
             collection_id: The collection key to browse
-            limit: Maximum number of items to return (default 25)
+            limit: Maximum number of items to return per page (default 25, max 100)
+            start: Offset of the first item; pass the value suggested by the
+                previous call's footer to fetch the next page (default 0)
         """
         try:
             limit = _validate_limit(limit, maximum=100)
+            start = _validate_start(start)
             zot = _get_zot()
-            await _zot_call(zot.collection, collection_id)
+            page = await _zot_call(
+                zot.collection_items_top,
+                collection_id,
+                limit=limit,
+                start=start,
+            )
         except Exception as e:
             return tool_error(f"Could not fetch collection items: {e}")
 
-        results = []
-        start = 0
-        page_size = min(100, max(limit * 2, 20))
-        while len(results) < limit and start < 1000:
-            try:
-                page = await _zot_call(
-                    zot.collection_items,
-                    collection_id,
-                    limit=page_size,
-                    start=start,
-                )
-            except Exception as exc:
-                return tool_error(f"Could not fetch collection items: {exc}")
-            if not page:
-                break
-            results.extend(
-                item
-                for item in page
-                if item.get("data", {}).get("itemType")
-                not in ("attachment", "note", "annotation")
-            )
-            if len(page) < page_size:
-                break
-            start += page_size
+        total = _total_results(zot, start + len(page))
+        if not page:
+            if start == 0:
+                return "Empty collection."
+            return "No more items." + _page_footer(start, 0, total)
 
-        if not results:
-            return "Empty collection."
-
-        lines = [_fmt_item(item.get("data", {})) for item in results[:limit]]
-
-        return "\n".join(lines) if lines else "Empty collection."
+        lines = [
+            _fmt_item(item.get("data", {}))
+            for item in page
+            if item.get("data", {}).get("itemType") not in ("attachment", "note", "annotation")
+        ]
+        body = "\n".join(lines) if lines else "(only attachments/notes in this range)"
+        # ponytail: footer counts raw page rows so the start cursor stays valid
+        # even when standalone notes/attachments are filtered from display
+        return body + _page_footer(start, len(page), total)
 
     @mcp.tool(annotations=WRITE)
     async def rename_collection(collection_id: str, new_name: str) -> str:
