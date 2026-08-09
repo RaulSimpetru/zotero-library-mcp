@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zotero-library-mcp"
-version = "0.8.2"
+version = "0.8.3"
 description = "MCP server for searching, reading, annotating, and managing Zotero libraries"
 readme = "README.md"
 license = "MIT"
@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "mcp[cli]>=1.26.0",
+    "mcp[cli]>=1.26.0,<2",
     "pyzotero>=1.5.0",
     "httpx>=0.27.0",
     "pymupdf>=1.24.0",
