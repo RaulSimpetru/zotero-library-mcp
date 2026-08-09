@@ -4,33 +4,33 @@ from mcp.types import ToolAnnotations
 
 
 READ_ONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
 
 READ_ONLY_OPEN_WORLD = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 WRITE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    openWorldHint=False,
+    read_only_hint=False,
+    destructive_hint=False,
+    open_world_hint=False,
 )
 
 WRITE_OPEN_WORLD = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    open_world_hint=True,
 )
 
 DESTRUCTIVE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    openWorldHint=False,
+    read_only_hint=False,
+    destructive_hint=True,
+    open_world_hint=False,
 )

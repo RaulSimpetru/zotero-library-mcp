@@ -114,9 +114,9 @@ def test_temporary_resource_uses_opaque_uri_and_reads_bytes(tmp_path):
 
 
 def test_resource_result_validates_with_string_tool_schema(tmp_path):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
-    server = FastMCP("resource-test")
+    server = MCPServer("resource-test")
     path = tmp_path / "result.pdf"
     path.write_bytes(b"%PDF-result")
     uri = register_temp_resource(str(path), name="result.pdf", mime_type="application/pdf")
@@ -133,8 +133,8 @@ def test_resource_result_validates_with_string_tool_schema(tmp_path):
 
     result = asyncio.run(server.call_tool("make_file", {}))
 
-    assert result.isError is False
-    assert result.structuredContent["result"] == "ready"
+    assert result.is_error is False
+    assert result.structured_content["result"] == "ready"
     assert any(block.type == "resource_link" for block in result.content)
 
 

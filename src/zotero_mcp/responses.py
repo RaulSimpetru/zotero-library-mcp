@@ -46,15 +46,15 @@ def sanitize_error_message(message: str) -> str:
 
 
 def tool_error(message: str) -> CallToolResult:
-    """Return a failure that MCP clients see as ``isError=true``."""
+    """Return a failure that MCP clients see as ``is_error=true``."""
 
     message = sanitize_error_message(message)
     return CallToolResult(
         content=[TextContent(type="text", text=message)],
-        # ``result`` keeps this compatible with FastMCP's auto-generated
+        # ``result`` keeps this compatible with MCPServer's auto-generated
         # wrapper schema for functions annotated as returning ``str``.
-        structuredContent={"result": message},
-        isError=True,
+        structured_content={"result": message},
+        is_error=True,
     )
 
 
@@ -82,11 +82,11 @@ def resource_result(
                 type="resource_link",
                 uri=uri,
                 name=name,
-                mimeType=mime_type,
+                mime_type=mime_type,
                 size=size,
             ),
         ],
-        structuredContent={
+        structured_content={
             "result": message,
             "ok": True,
             "message": message,

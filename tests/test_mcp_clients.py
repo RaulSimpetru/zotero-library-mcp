@@ -7,19 +7,7 @@ import pytest
 from zotero_mcp.server import build_parser, configure_server, mcp
 
 
-def _restore_server_settings(monkeypatch):
-    for name in (
-        "host",
-        "port",
-        "streamable_http_path",
-        "stateless_http",
-        "transport_security",
-    ):
-        monkeypatch.setattr(mcp.settings, name, getattr(mcp.settings, name))
-
-
-def test_streamable_http_configuration_accepts_tunnel_host(monkeypatch):
-    _restore_server_settings(monkeypatch)
+def test_streamable_http_configuration_accepts_tunnel_host():
     args = build_parser().parse_args(
         [
             "--transport",
@@ -33,16 +21,19 @@ def test_streamable_http_configuration_accepts_tunnel_host(monkeypatch):
         ]
     )
 
-    configure_server(args)
+    options = configure_server(args)
 
-    assert mcp.settings.port == 9000
-    assert mcp.settings.streamable_http_path == "/mcp"
-    assert "zotero.example.com" in mcp.settings.transport_security.allowed_hosts
-    assert "https://chatgpt.com" in mcp.settings.transport_security.allowed_origins
+    assert options["port"] == 9000
+    assert options["streamable_http_path"] == "/mcp"
+    assert "zotero.example.com" in options["transport_security"].allowed_hosts
+    assert "https://chatgpt.com" in options["transport_security"].allowed_origins
+
+
+def test_stdio_transport_takes_no_run_options():
+    assert configure_server(build_parser().parse_args([])) == {}
 
 
 def test_non_loopback_http_requires_an_allowed_host(monkeypatch):
-    _restore_server_settings(monkeypatch)
     monkeypatch.delenv("ZOTERO_MCP_ALLOWED_HOSTS", raising=False)
     args = build_parser().parse_args(
         ["--transport", "streamable-http", "--host", "0.0.0.0"]
@@ -52,8 +43,7 @@ def test_non_loopback_http_requires_an_allowed_host(monkeypatch):
         configure_server(args)
 
 
-def test_non_loopback_http_requires_auth_or_explicit_acknowledgement(monkeypatch):
-    _restore_server_settings(monkeypatch)
+def test_non_loopback_http_requires_auth_or_explicit_acknowledgement():
     args = build_parser().parse_args(
         [
             "--transport",
@@ -78,11 +68,11 @@ def test_all_tools_declare_chatgpt_safety_annotations():
     assert tools
     for tool in tools:
         assert tool.annotations is not None, tool.name
-        assert tool.annotations.readOnlyHint is not None, tool.name
-        assert tool.annotations.destructiveHint is not None, tool.name
-        assert tool.annotations.openWorldHint is not None, tool.name
+        assert tool.annotations.read_only_hint is not None, tool.name
+        assert tool.annotations.destructive_hint is not None, tool.name
+        assert tool.annotations.open_world_hint is not None, tool.name
         assert tool.title, tool.name
-        assert tool.outputSchema is not None, tool.name
+        assert tool.output_schema is not None, tool.name
 
 
 def test_destructive_tools_are_labeled():
@@ -97,10 +87,10 @@ def test_destructive_tools_are_labeled():
         "save_pdf",
         "save_bibtex",
     ):
-        assert tools[name].annotations.destructiveHint is True
+        assert tools[name].annotations.destructive_hint is True
 
-    assert tools["search_library"].annotations.readOnlyHint is True
-    assert tools["download_pdf"].annotations.readOnlyHint is True
+    assert tools["search_library"].annotations.read_only_hint is True
+    assert tools["download_pdf"].annotations.read_only_hint is True
 
 
 def test_chatgpt_file_input_schema_is_complete():
@@ -108,7 +98,7 @@ def test_chatgpt_file_input_schema_is_complete():
     tool = tools["attach_file"]
 
     assert tool.meta["openai/fileParams"] == ["file"]
-    file_schema = tool.inputSchema["$defs"]["OpenAIFile"]
+    file_schema = tool.input_schema["$defs"]["OpenAIFile"]
     assert set(file_schema["properties"]) == {
         "download_url",
         "file_id",
@@ -121,7 +111,7 @@ def test_chatgpt_file_input_schema_is_complete():
 def test_download_progress_context_is_not_exposed_as_tool_input():
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
-    assert set(tools["download_pdf"].inputSchema["properties"]) == {
+    assert set(tools["download_pdf"].input_schema["properties"]) == {
         "item_key",
         "attachment_key",
     }
@@ -129,7 +119,7 @@ def test_download_progress_context_is_not_exposed_as_tool_input():
 
 def test_file_resource_templates_preserve_media_types():
     templates = {
-        template.uriTemplate: template.mimeType
+        template.uri_template: template.mime_type
         for template in asyncio.run(mcp.list_resource_templates())
     }
 
@@ -164,5 +154,5 @@ def test_high_value_tools_are_registered():
 def test_invalid_tool_input_returns_mcp_error():
     result = asyncio.run(mcp.call_tool("search_library", {"query": ""}))
 
-    assert result.isError is True
-    assert result.structuredContent["result"] == "query must not be empty"
+    assert result.is_error is True
+    assert result.structured_content["result"] == "query must not be empty"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import fitz
 from fuzzysearch import find_near_matches
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from ._helpers import (
     MAX_ATTACHMENT_BYTES,

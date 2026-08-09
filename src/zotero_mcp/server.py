@@ -4,8 +4,9 @@ import argparse
 import logging
 import os
 from collections.abc import Sequence
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import annotations, collections, library, papers, tags
@@ -23,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 _auth_settings, _token_verifier = build_mcp_auth()
 
-mcp = FastMCP(
+mcp = MCPServer(
     "zotero",
     instructions=(
         "Search and manage Zotero. Resolve real item and collection keys before "
@@ -169,15 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def configure_server(args: argparse.Namespace) -> None:
-    """Apply parsed transport settings to the shared FastMCP server."""
+def configure_server(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate transport settings and build the keyword arguments for ``mcp.run``.
+
+    MCP 2.0 takes host/port/path options as ``run()`` arguments rather than
+    server-level settings, so these are returned instead of assigned.
+    """
     if not args.http_path.startswith("/"):
         raise ValueError("--http-path must start with '/'")
-
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
-    mcp.settings.streamable_http_path = args.http_path
-    mcp.settings.stateless_http = args.stateless_http
 
     configure_runtime(
         transport=args.transport,
@@ -186,7 +186,7 @@ def configure_server(args: argparse.Namespace) -> None:
     )
 
     if args.transport != "streamable-http":
-        return
+        return {}
 
     local_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     local_origins = [
@@ -213,21 +213,27 @@ def configure_server(args: argparse.Namespace) -> None:
             "--allow-unauthenticated-http when an external access-control layer is used."
         )
 
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed_hosts,
-        allowed_origins=allowed_origins,
-    )
+    return {
+        "host": args.host,
+        "port": args.port,
+        "streamable_http_path": args.http_path,
+        "stateless_http": args.stateless_http,
+        "transport_security": TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        ),
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the Zotero MCP server over stdio or Streamable HTTP."""
     args = build_parser().parse_args(argv)
     try:
-        configure_server(args)
+        run_options = configure_server(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    mcp.run(transport=args.transport)
+    mcp.run(transport=args.transport, **run_options)
 
 
 if __name__ == "__main__":

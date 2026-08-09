@@ -79,7 +79,7 @@ class JWTTokenVerifier:
 
 
 def build_mcp_auth() -> tuple[AuthSettings | None, JWTTokenVerifier | None]:
-    """Build FastMCP auth objects when an external issuer is configured."""
+    """Build MCP server auth objects when an external issuer is configured."""
 
     config = oauth_config_from_env()
     if config is None:

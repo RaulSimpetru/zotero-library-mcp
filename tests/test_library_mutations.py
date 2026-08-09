@@ -78,8 +78,8 @@ def test_metadata_update_rejects_field_invalid_for_item_type(monkeypatch):
         registered["update_item_metadata"]("ABCD1234", {"publisher": "Wrong field"})
     )
 
-    assert result.isError is True
-    assert "Unsupported field" in result.structuredContent["result"]
+    assert result.is_error is True
+    assert "Unsupported field" in result.structured_content["result"]
     zot.client.patch.assert_not_called()
 
 
