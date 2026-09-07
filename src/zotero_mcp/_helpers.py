@@ -185,18 +185,26 @@ async def _download_file_from_url(
         raise
 
 
-def _get_zot() -> zotero.Zotero:
-    """Create a Pyzotero client from environment config."""
-    library_id = os.environ.get("ZOTERO_LIBRARY_ID", ZOTERO_LIBRARY_ID)
+def _get_zot(
+    library_id: str | None = None,
+    library_type: str | None = None,
+) -> zotero.Zotero:
+    """Create a client for this call without changing the configured default."""
+    if (library_id is None) != (library_type is None):
+        raise ValueError("Pass both library_id and library_type, or omit both")
+    if library_id is None:
+        library_id = os.environ.get("ZOTERO_LIBRARY_ID", ZOTERO_LIBRARY_ID)
+        library_type = os.environ.get("ZOTERO_LIBRARY_TYPE", ZOTERO_LIBRARY_TYPE)
     api_key = os.environ.get("ZOTERO_API_KEY", ZOTERO_API_KEY)
-    library_type = os.environ.get("ZOTERO_LIBRARY_TYPE", ZOTERO_LIBRARY_TYPE)
     if not library_id or not api_key:
         raise ValueError(
             "ZOTERO_LIBRARY_ID and ZOTERO_API_KEY environment variables must be set. "
             "Get your API key at https://www.zotero.org/settings/keys"
         )
     if library_type not in {"user", "group"}:
-        raise ValueError("ZOTERO_LIBRARY_TYPE must be 'user' or 'group'")
+        raise ValueError("library_type must be 'user' or 'group'")
+    if not isinstance(library_id, str) or not re.fullmatch(r"[1-9][0-9]*", library_id):
+        raise ValueError("library_id must be a positive numeric ID")
     return zotero.Zotero(library_id, library_type, api_key)
 
 
@@ -351,8 +359,14 @@ async def _find_open_access_pdf(doi: str) -> str | None:
 # File attachment helpers (WebDAV / local / URL)
 # ---------------------------------------------------------------------------
 
-def _use_webdav() -> bool:
-    """Check if WebDAV is configured for file storage."""
+def _use_webdav(zot: zotero.Zotero) -> bool:
+    """WebDAV belongs to the configured personal library, never a group."""
+    if str(zot.library_type).rstrip("s") != "user":
+        return False
+    if str(zot.library_id) != os.environ.get("ZOTERO_LIBRARY_ID", ZOTERO_LIBRARY_ID):
+        return False
+    if os.environ.get("ZOTERO_LIBRARY_TYPE", ZOTERO_LIBRARY_TYPE) != "user":
+        return False
     return all(_webdav_config())
 
 
@@ -491,7 +505,7 @@ async def _attach_pdf_from_url(zot: zotero.Zotero, parent_key: str, url: str) ->
             max_bytes=MAX_PDF_BYTES,
             require_pdf=True,
         )
-        if _use_webdav():
+        if _use_webdav(zot):
             result = await _attach_file_webdav(zot, parent_key, tmp_path)
         else:
             result = await _attach_file_local(zot, parent_key, tmp_path)
@@ -535,7 +549,7 @@ async def _download_pdf(
     if not att_key:
         raise ValueError(f"No PDF attachment found for item {item_key}")
 
-    if _use_webdav():
+    if _use_webdav(zot):
         webdav_url, webdav_user, webdav_password = _webdav_config()
         auth = (webdav_user, webdav_password)
         zip_path = None

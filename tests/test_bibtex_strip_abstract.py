@@ -58,7 +58,7 @@ class TestBibtexStripAbstract:
         mock_zot.item.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](item_keys=["K001"]))
         assert "Attention Is All You Need" in result
@@ -71,7 +71,7 @@ class TestBibtexStripAbstract:
         mock_zot.item.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](item_keys=["K001"], include_abstract=True))
         assert "abstract" in result.lower()
@@ -84,7 +84,7 @@ class TestBibtexStripAbstract:
         mock_zot.item.side_effect = [_make_bibdb([entries[0]]), _make_bibdb([entries[1]])]
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](item_keys=["K001", "K002"]))
         assert "Attention Is All You Need" in result
@@ -98,7 +98,7 @@ class TestBibtexStripAbstract:
         mock_zot.collection_items.return_value = _make_bibdb(entries)
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](collection_id="COL1"))
         assert "abstract" not in result.lower()
@@ -116,7 +116,7 @@ class TestBibtexStripAbstract:
         mock_zot.item.return_value = raw_bib
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](item_keys=["K001"]))
         assert "Attention Is All You Need" in result

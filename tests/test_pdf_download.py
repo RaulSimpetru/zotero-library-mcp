@@ -32,7 +32,7 @@ def test_zotero_pdf_download_reports_progress(monkeypatch):
     async def progress(value, message):
         updates.append((value, message))
 
-    monkeypatch.setattr(helpers, "_use_webdav", lambda: False)
+    monkeypatch.setattr(helpers, "_use_webdav", lambda *_args: False)
     path, attachment_key = asyncio.run(
         helpers._download_pdf(zot, "ITEM1234", progress=progress)
     )
@@ -68,7 +68,7 @@ def test_webdav_timeout_has_actionable_message(monkeypatch):
         def stream(self, *_args, **_kwargs):
             return TimeoutStream()
 
-    monkeypatch.setattr(helpers, "_use_webdav", lambda: True)
+    monkeypatch.setattr(helpers, "_use_webdav", lambda *_args: True)
     monkeypatch.setattr(
         helpers,
         "_webdav_config",

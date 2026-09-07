@@ -9,7 +9,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import annotations, collections, library, papers, tags
+from . import annotations, collections, libraries, library, papers, tags
 from .auth import build_mcp_auth, oauth_tool_meta
 from .file_resources import read_temp_resource
 from .runtime import configure_runtime
@@ -18,6 +18,7 @@ from .runtime import configure_runtime
 # HTTPX logs complete URLs at INFO. Some upstream APIs put credentials or
 # private identifiers in URLs, so keep transport request logs at warning only.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -30,7 +31,10 @@ mcp = MCPServer(
         "Search and manage Zotero. Resolve real item and collection keys before "
         "mutations; never invent keys. Prefer trash_item over deletion. For new "
         "citations prefer DOI, arXiv ID, then ISBN. Use list_attachments before "
-        "choosing among multiple PDFs."
+        "choosing among multiple PDFs. Use list_libraries to discover shared libraries. "
+        "Pass both library_id and library_type on every call for that library; "
+        "omitting them uses the configured default. Item and collection keys are "
+        "scoped to their library."
     ),
     website_url="https://github.com/RaulSimpetru/zotero-library-mcp",
     auth=_auth_settings,
@@ -38,6 +42,7 @@ mcp = MCPServer(
 )
 
 # Register all tool groups
+libraries.register(mcp)
 papers.register(mcp)
 library.register(mcp)
 collections.register(mcp)

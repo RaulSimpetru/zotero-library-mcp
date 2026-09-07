@@ -37,7 +37,7 @@ class TestSearchLibraryPagination:
         registered = _setup(lib_mod.register)
         zot = _mock_zot()
         zot.items.return_value = [_make_item("Paper A", key="K100")]
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("deep", limit=100, start=100))
 
@@ -48,7 +48,7 @@ class TestSearchLibraryPagination:
 
     def test_limit_cap_is_now_100(self, monkeypatch):
         registered = _setup(lib_mod.register)
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: _mock_zot())
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: _mock_zot())
 
         result = asyncio.run(registered["search_library"]("q", limit=101))
         assert "between 1 and 100" in str(result)
@@ -57,7 +57,7 @@ class TestSearchLibraryPagination:
         registered = _setup(lib_mod.register)
         zot = _mock_zot(total="30")
         zot.items.return_value = []
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("deep", start=30))
         assert "No more results." in result
@@ -68,7 +68,7 @@ class TestSearchLibraryPagination:
         registered = _setup(lib_mod.register)
         zot = _mock_zot(total="1")
         zot.items.return_value = [_make_item("Only One")]
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("only"))
         assert "Showing items 1–1 of 1." in result
@@ -83,7 +83,7 @@ class TestGetCollectionItemsPagination:
             _make_item("Paper B", key="K101"),
             _make_item("Standalone note", item_type="note", key="N001"),
         ]
-        monkeypatch.setattr(col_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(col_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["get_collection_items"]("COLL1", limit=2, start=100))
 
@@ -98,7 +98,7 @@ class TestGetCollectionItemsPagination:
         registered = _setup(col_mod.register)
         zot = _mock_zot(total="0")
         zot.collection_items_top.return_value = []
-        monkeypatch.setattr(col_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(col_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["get_collection_items"]("COLL1"))
         assert result == "Empty collection."
@@ -107,7 +107,7 @@ class TestGetCollectionItemsPagination:
         registered = _setup(col_mod.register)
         zot = _mock_zot(total="566")
         zot.collection_items_top.return_value = []
-        monkeypatch.setattr(col_mod, "_get_zot", lambda: zot)
+        monkeypatch.setattr(col_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["get_collection_items"]("COLL1", start=600))
         assert "No more items." in result
@@ -115,7 +115,7 @@ class TestGetCollectionItemsPagination:
 
     def test_invalid_start_rejected(self, monkeypatch):
         registered = _setup(col_mod.register)
-        monkeypatch.setattr(col_mod, "_get_zot", lambda: _mock_zot())
+        monkeypatch.setattr(col_mod, "_get_zot", lambda *_args: _mock_zot())
 
         result = asyncio.run(registered["get_collection_items"]("COLL1", start=-1))
         assert "non-negative" in str(result)
