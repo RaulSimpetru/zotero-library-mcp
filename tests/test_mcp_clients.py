@@ -1,10 +1,28 @@
 """Compatibility checks for Codex and ChatGPT MCP clients."""
 
 import asyncio
+import logging
+import subprocess
+import sys
 
 import pytest
 
 from zotero_mcp.server import build_parser, configure_server, mcp
+
+
+def test_http_clients_do_not_log_credential_bearing_urls():
+    for name in ("httpx", "httpx2"):
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
+
+
+def test_server_import_does_not_print_non_protocol_output():
+    result = subprocess.run(
+        [sys.executable, "-c", "import zotero_mcp.server"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == ""
 
 
 def test_streamable_http_configuration_accepts_tunnel_host():

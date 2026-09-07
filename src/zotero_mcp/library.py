@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import bibtexparser
-import fitz
+import pymupdf as fitz
 from fuzzysearch import find_near_matches
 from mcp.types import CallToolResult
 

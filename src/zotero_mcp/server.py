@@ -18,6 +18,7 @@ from .runtime import configure_runtime
 # HTTPX logs complete URLs at INFO. Some upstream APIs put credentials or
 # private identifiers in URLs, so keep transport request logs at warning only.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # MCP server

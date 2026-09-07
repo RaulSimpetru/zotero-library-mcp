@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-import fitz
+import pymupdf as fitz
 from fuzzysearch import find_near_matches
 from mcp.server.mcpserver import Context
 
