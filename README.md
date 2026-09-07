@@ -275,6 +275,18 @@ configured personal library, even when the same server accesses shared groups.
 
 > **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, attachments in the configured personal library use WebDAV instead of Zotero's built-in storage. Group attachments always use Zotero storage. The server automatically appends `/zotero` to the WebDAV base URL, matching Zotero Desktop's behavior.
 
+## Version 0.10.0
+
+- Discover personal and shared libraries with `list_libraries`.
+- Target a library on each tool call using `library_id` and `library_type`;
+  existing calls keep the configured default.
+- Keep concurrent calls and nested exports scoped to the selected library.
+- Use Zotero storage for shared-library attachments and personal WebDAV only
+  for the configured personal library.
+- Keep current dependency imports and HTTP logging compatible with MCP stdio.
+
+Restart the MCP connection after upgrading to load the new tool schemas.
+
 ## Upgrading to 0.8
 
 Two path-writing operations were split from their read-only counterparts so remote clients can apply correct safety approvals:
