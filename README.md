@@ -22,6 +22,7 @@ The server supports both MCP transports used by these clients:
 
 ### Searching & browsing
 
+- `list_libraries` — Discover the API key owner's personal library and shared group libraries, with IDs and key permissions
 - **`search_library`** — Search your Zotero library by title, author, tag, etc., paginated via `start`/`limit` (falls back to fuzzy matching when the exact search returns no results)
 - **`get_item_details`** — View full metadata for any item
 - **`get_recent_items`** — List recently added items
@@ -180,7 +181,7 @@ The MCP endpoint is `https://your-tunnel.example.com/mcp`. Enable developer mode
 
 > **Security:** The safest personal setup is OpenAI Secure MCP Tunnel with the MCP server bound to loopback. HTTP mode disables all server-path reads and writes by default. `attach_file` accepts ChatGPT's authorized file object, while `download_pdf` returns an opaque MCP resource link. Safety annotations are approval hints, not an authorization boundary.
 
-For a public single-library deployment, configure an external OAuth 2.1 identity provider. The server validates JWT access tokens against its JWKS endpoint:
+For a public deployment, configure an external OAuth 2.1 identity provider. The server validates JWT access tokens against its JWKS endpoint:
 
 ```bash
 export ZOTERO_MCP_OAUTH_ISSUER=https://auth.example.com
@@ -191,7 +192,7 @@ export ZOTERO_MCP_OAUTH_SCOPES=zotero:read,zotero:write
 
 The authorization server must publish OAuth/OIDC discovery metadata, support the MCP OAuth 2.1 flow with PKCE, issue tokens for `ZOTERO_MCP_OAUTH_RESOURCE`, and include the configured scopes. See OpenAI's [authentication guide](https://developers.openai.com/apps-sdk/build/auth). For testing behind an already authenticated gateway only, `--allow-unauthenticated-http` explicitly acknowledges an unauthenticated non-loopback listener.
 
-This process still uses one server-side Zotero library key. A true multi-user service must map the verified OAuth identity to separate Zotero credentials and enforce per-user authorization; that deployment architecture is intentionally outside this personal-server package.
+This process still uses one server-side Zotero API key. Every authenticated MCP client can target libraries available to that key, including shared groups. Use a key scoped to the libraries intended for those clients. A true multi-user service must map the verified OAuth identity to separate Zotero credentials and enforce per-user authorization; that deployment architecture is intentionally outside this personal-server package.
 
 If an HTTP deployment genuinely needs server paths, enable them only inside confined roots:
 
@@ -223,13 +224,44 @@ ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
   uvx --from git+https://github.com/RaulSimpetru/zotero-library-mcp zotero-mcp
 ```
 
+## Personal and shared group libraries
+
+The environment variables select the **default library**. Existing calls that omit
+library arguments continue to use that default.
+
+Call `list_libraries()` to discover the key owner's personal library and shared
+groups. Results include `name`, `library_id`, `library_type`, `is_default`, and
+`key_permissions`. Group results are paginated with `limit` and `start`; follow
+`next_start` until it is null. Discovery also works when the default is a group.
+
+Every other tool accepts optional `library_id` and `library_type` arguments:
+
+```text
+list_libraries()
+list_collections(library_id="123456", library_type="group")
+search_library(query="ultrasound", library_id="123456", library_type="group")
+get_item_details(item_key="<key from that group>", library_id="123456", library_type="group")
+search_library(query="ultrasound")  # Uses the configured default again
+```
+
+Pass **both** arguments to select a library, or omit both. Use IDs returned by
+`list_libraries`, rather than group names. Selection applies to one call and never
+changes the environment or another client's target, including concurrent calls.
+Item and collection keys must come from the selected library. Zotero enforces the
+API key's permissions and the user's group rights; a denied group request fails
+without falling back to the personal library. `health_check` accepts the same
+arguments to verify a specific library without writing to it.
+
+Group attachments use Zotero's built-in storage. WebDAV is used only for the
+configured personal library, even when the same server accesses shared groups.
+
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ZOTERO_LIBRARY_ID` | Yes | Your Zotero user or group library ID |
+| `ZOTERO_LIBRARY_ID` | Yes | Default Zotero user or group library ID |
 | `ZOTERO_API_KEY` | Yes | API key with read/write permissions |
-| `ZOTERO_LIBRARY_TYPE` | No | `user` (default) or `group` |
+| `ZOTERO_LIBRARY_TYPE` | No | Default library type: `user` (default) or `group` |
 | `CROSSREF_MAILTO` | No | Your email for CrossRef polite pool (faster API access) |
 | `UNPAYWALL_EMAIL` | No | Contact email for open-access PDF lookup (defaults to `CROSSREF_MAILTO`) |
 | `ZOTERO_WEBDAV_URL` | No | WebDAV URL for file storage (e.g. `https://dav.example.com`) |
@@ -241,7 +273,7 @@ ZOTERO_LIBRARY_ID=your_id ZOTERO_API_KEY=your_key \
 | `ZOTERO_MCP_OAUTH_SCOPES` | No | Comma-separated required scopes (defaults to read and write) |
 | `ZOTERO_MCP_FILE_ROOTS` | No | Comma-separated allowed roots when HTTP server paths are enabled |
 
-> **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, file attachments are uploaded to your WebDAV server instead of Zotero's built-in storage. The server automatically appends `/zotero` to the base URL, matching Zotero Desktop's behavior.
+> **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, attachments in the configured personal library use WebDAV instead of Zotero's built-in storage. Group attachments always use Zotero storage. The server automatically appends `/zotero` to the WebDAV base URL, matching Zotero Desktop's behavior.
 
 ## Upgrading to 0.8
 

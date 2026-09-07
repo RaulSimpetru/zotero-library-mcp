@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import fitz
 from fuzzysearch import find_near_matches
@@ -15,11 +16,11 @@ from mcp.server.mcpserver import Context
 from ._helpers import (
     MAX_ATTACHMENT_BYTES,
     _attach_file_local,
-    _download_pdf,
+    _attach_file_webdav,
     _download_file_from_url,
+    _download_pdf,
     _get_zot,
     _use_webdav,
-    _attach_file_webdav,
     _validate_limit,
     _zot_call,
 )
@@ -27,7 +28,6 @@ from .file_resources import register_temp_resource
 from .responses import resource_result, tool_error
 from .runtime import OpenAIFile, validate_server_path
 from .tool_annotations import DESTRUCTIVE, READ_ONLY, WRITE
-
 
 HIGHLIGHT_COLORS = ["#ffd400", "#ff6666", "#5fb236", "#2ea8e5", "#a28ae5"]
 DEFAULT_HIGHLIGHT_COLOR = "#ffd400"
@@ -94,7 +94,12 @@ def _fuzzy_find_in_page(words, word_texts, search_norm, max_l_dist=None):
 
 def register(mcp):
     @mcp.tool(annotations=WRITE)
-    async def add_note(item_key: str, note: str) -> str:
+    async def add_note(
+        item_key: str,
+        note: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add a note to a Zotero item.
 
         The note is created as a child of the specified item.
@@ -103,10 +108,13 @@ def register(mcp):
         Args:
             item_key: The parent Zotero item key to attach the note to
             note: The note content (plain text or HTML)
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         if not note.strip():
             return tool_error("note must not be empty")
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             await _zot_call(zot.item, item_key)
@@ -140,6 +148,8 @@ def register(mcp):
         attachment_key: str | None = None,
         page_number: int | None = None,
         occurrence: int = 1,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Highlight a text passage in a PDF attached to a Zotero item.
 
@@ -167,6 +177,9 @@ def register(mcp):
             attachment_key: Optional PDF attachment key when the item has multiple PDFs
             page_number: Optional one-based page number to search
             occurrence: One-based occurrence to highlight when text repeats
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             quoted_text = quoted_text.strip()
@@ -181,7 +194,7 @@ def register(mcp):
                 raise ValueError("page_number must be at least 1")
             if occurrence < 1:
                 raise ValueError("occurrence must be at least 1")
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
         except Exception as exc:
             return tool_error(f"Invalid annotation request: {exc}")
         tmp_path = None
@@ -423,16 +436,24 @@ def register(mcp):
                 os.unlink(tmp_path)
 
     @mcp.tool(annotations=READ_ONLY)
-    async def get_annotations(item_key: str, limit: int = 100) -> str:
+    async def get_annotations(
+        item_key: str,
+        limit: int = 100,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """List all highlights and annotations on a paper's PDF.
 
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
             limit: Maximum number of annotations to return (default 100)
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=500)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             children = await _zot_call(zot.children, item_key)
         except Exception as e:
             return tool_error(f"Could not find item {item_key}: {e}")
@@ -480,6 +501,8 @@ def register(mcp):
         item_key: str,
         file: OpenAIFile | None = None,
         file_path: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Attach a ChatGPT file input or an authorized local file to an item.
 
@@ -487,6 +510,9 @@ def register(mcp):
             item_key: The Zotero item key to attach the file to
             file: File object supplied by ChatGPT through openai/fileParams
             file_path: Local server path; stdio only unless HTTP roots are explicitly enabled
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         if (file is None) == (file_path is None):
             return tool_error("Provide exactly one of file or file_path")
@@ -523,7 +549,7 @@ def register(mcp):
                 Path(tmp_path).unlink(missing_ok=True)
             return tool_error(f"Could not read attachment input: {exc}")
 
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             await _zot_call(zot.item, item_key)
@@ -533,7 +559,7 @@ def register(mcp):
             return tool_error(f"Could not find item {item_key}: {e}")
 
         try:
-            if _use_webdav():
+            if _use_webdav(zot):
                 result = await _attach_file_webdav(zot, item_key, source_path)
                 if result:
                     return f"Attached '{filename}' to item {item_key} (via WebDAV)"
@@ -553,6 +579,8 @@ def register(mcp):
         item_key: str,
         ctx: Context,
         attachment_key: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Return a PDF as a remote-safe MCP resource link.
 
@@ -562,8 +590,11 @@ def register(mcp):
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
             attachment_key: Optional PDF attachment key when the item has multiple PDFs
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         async def report_progress(value: float, message: str) -> None:
             await ctx.report_progress(value, total=100, message=message)
@@ -615,10 +646,16 @@ def register(mcp):
         item_key: str,
         save_path: str,
         attachment_key: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
-        """Save a Zotero PDF to an authorized local server path."""
+        """Save a Zotero PDF to an authorized local server path.
 
-        zot = _get_zot()
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
+
+        zot = _get_zot(library_id, library_type)
         try:
             tmp_path, _ = await _download_pdf(zot, item_key, attachment_key)
         except Exception as exc:
@@ -642,12 +679,21 @@ def register(mcp):
                 staging.unlink(missing_ok=True)
 
     @mcp.tool(annotations=READ_ONLY)
-    async def list_notes(item_key: str, limit: int = 50) -> dict[str, object]:
-        """List child notes for an item with bounded note content."""
+    async def list_notes(
+        item_key: str,
+        limit: int = 50,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> dict[str, object]:
+        """List child notes for an item with bounded note content.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         try:
             limit = _validate_limit(limit, maximum=200)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             children = await _zot_call(zot.children, item_key)
         except Exception as exc:
             return tool_error(f"Could not list notes for {item_key}: {exc}")
@@ -671,13 +717,22 @@ def register(mcp):
         return {"item_key": item_key, "count": len(notes), "notes": notes}
 
     @mcp.tool(annotations=WRITE)
-    async def update_note(note_key: str, note: str) -> str:
-        """Replace the content of an existing Zotero note."""
+    async def update_note(
+        note_key: str,
+        note: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """Replace the content of an existing Zotero note.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         if not note.strip():
             return tool_error("note must not be empty")
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             item = await _zot_call(zot.item, note_key)
             data = item.get("data", {})
             if data.get("itemType") != "note":
@@ -689,11 +744,19 @@ def register(mcp):
             return tool_error(f"Failed to update note: {exc}")
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_note(note_key: str) -> str:
-        """Permanently delete a Zotero note."""
+    async def delete_note(
+        note_key: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """Permanently delete a Zotero note.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             item = await _zot_call(zot.item, note_key)
             if item.get("data", {}).get("itemType") != "note":
                 return tool_error(f"Item {note_key} is not a note")
@@ -707,15 +770,21 @@ def register(mcp):
         annotation_key: str,
         comment: str | None = None,
         color: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
-        """Update the comment and/or highlight color of an annotation."""
+        """Update the comment and/or highlight color of an annotation.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         if comment is None and color is None:
             return tool_error("Provide comment and/or color")
         try:
             if color is not None:
                 color = _validate_hex_color(color)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             item = await _zot_call(zot.item, annotation_key)
             data = item.get("data", {})
             if data.get("itemType") != "annotation":
@@ -730,11 +799,19 @@ def register(mcp):
             return tool_error(f"Failed to update annotation: {exc}")
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_annotation(annotation_key: str) -> str:
-        """Permanently delete a Zotero annotation."""
+    async def delete_annotation(
+        annotation_key: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """Permanently delete a Zotero annotation.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             item = await _zot_call(zot.item, annotation_key)
             if item.get("data", {}).get("itemType") != "annotation":
                 return tool_error(f"Item {annotation_key} is not an annotation")

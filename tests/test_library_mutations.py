@@ -51,7 +51,7 @@ def test_metadata_update_uses_type_template_and_partial_patch(monkeypatch):
 
     import zotero_mcp.library as library
 
-    monkeypatch.setattr(library, "_get_zot", lambda: zot)
+    monkeypatch.setattr(library, "_get_zot", lambda *_args: zot)
     result = asyncio.run(
         registered["update_item_metadata"](
             "ABCD1234",
@@ -73,7 +73,7 @@ def test_metadata_update_rejects_field_invalid_for_item_type(monkeypatch):
 
     import zotero_mcp.library as library
 
-    monkeypatch.setattr(library, "_get_zot", lambda: zot)
+    monkeypatch.setattr(library, "_get_zot", lambda *_args: zot)
     result = asyncio.run(
         registered["update_item_metadata"]("ABCD1234", {"publisher": "Wrong field"})
     )
@@ -89,7 +89,7 @@ def test_trash_and_restore_use_deleted_partial_patch(monkeypatch):
 
     import zotero_mcp.library as library
 
-    monkeypatch.setattr(library, "_get_zot", lambda: zot)
+    monkeypatch.setattr(library, "_get_zot", lambda *_args: zot)
     trashed = asyncio.run(registered["trash_item"]("ABCD1234"))
     restored = asyncio.run(registered["restore_item"]("ABCD1234"))
 
@@ -128,7 +128,7 @@ def test_health_check_reports_write_access_without_mutating(monkeypatch):
 
     import zotero_mcp.library as library
 
-    monkeypatch.setattr(library, "_get_zot", lambda: zot)
+    monkeypatch.setattr(library, "_get_zot", lambda *_args: zot)
     result = asyncio.run(registered["health_check"]())
 
     assert result["read_access"] is True

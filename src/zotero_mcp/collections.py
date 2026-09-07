@@ -1,6 +1,7 @@
 """Tools for managing Zotero collections."""
 
 from collections import defaultdict
+from typing import Literal
 
 from ._helpers import (
     _fmt_item,
@@ -32,10 +33,17 @@ async def _collections_bounded(zot, maximum: int = 5000) -> tuple[list[dict], bo
 
 def register(mcp):
     @mcp.tool(annotations=READ_ONLY)
-    async def list_collections() -> str:
-        """List all collections in your Zotero library."""
+    async def list_collections(
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """List all collections in your Zotero library.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             collections, capped = await _collections_bounded(zot)
         except Exception as exc:
             return tool_error(f"Could not list collections: {exc}")
@@ -83,14 +91,22 @@ def register(mcp):
         return "\n".join(lines)
 
     @mcp.tool(annotations=WRITE)
-    async def add_to_collection(item_key: str, collection_id: str) -> str:
+    async def add_to_collection(
+        item_key: str,
+        collection_id: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add an existing Zotero item to a collection.
 
         Args:
             item_key: The Zotero item key (from search results)
             collection_id: The collection key to add it to
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             await _zot_call(zot.collection, collection_id)
@@ -115,14 +131,22 @@ def register(mcp):
         return f"Added '{data.get('title', item_key)}' to {collection_id}."
 
     @mcp.tool(annotations=WRITE)
-    async def remove_from_collection(item_key: str, collection_id: str) -> str:
+    async def remove_from_collection(
+        item_key: str,
+        collection_id: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Remove an item from a collection without deleting it from the library.
 
         Args:
             item_key: The Zotero item key
             collection_id: The collection key to remove it from
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             await _zot_call(zot.collection, collection_id)
@@ -146,17 +170,25 @@ def register(mcp):
         return f"Removed '{title}' from {collection_id}."
 
     @mcp.tool(annotations=WRITE)
-    async def create_collection(name: str, parent_collection_id: str | None = None) -> str:
+    async def create_collection(
+        name: str,
+        parent_collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Create a new collection in your Zotero library.
 
         Args:
             name: Name for the new collection
             parent_collection_id: Optional parent collection key to nest under
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         name = name.strip()
         if not name:
             return tool_error("Collection name must not be empty")
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             if parent_collection_id:
@@ -198,15 +230,22 @@ def register(mcp):
         return tool_error(f"Unexpected response from Zotero: {result}")
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_collection(collection_id: str) -> str:
+    async def delete_collection(
+        collection_id: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Permanently delete a collection from your Zotero library.
 
         Items in the collection are NOT deleted — they remain in your library.
 
         Args:
             collection_id: The collection key to delete
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             col = await _zot_call(zot.collection, collection_id)
@@ -223,7 +262,13 @@ def register(mcp):
         return f"Deleted collection [{collection_id}] {name}"
 
     @mcp.tool(annotations=READ_ONLY)
-    async def get_collection_items(collection_id: str, limit: int = 25, start: int = 0) -> str:
+    async def get_collection_items(
+        collection_id: str,
+        limit: int = 25,
+        start: int = 0,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Get items in a specific collection, one page at a time.
 
         Args:
@@ -231,11 +276,14 @@ def register(mcp):
             limit: Maximum number of items to return per page (default 25, max 100)
             start: Offset of the first item; pass the value suggested by the
                 previous call's footer to fetch the next page (default 0)
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=100)
             start = _validate_start(start)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             page = await _zot_call(
                 zot.collection_items_top,
                 collection_id,
@@ -262,14 +310,23 @@ def register(mcp):
         return body + _page_footer(start, len(page), total)
 
     @mcp.tool(annotations=WRITE)
-    async def rename_collection(collection_id: str, new_name: str) -> str:
-        """Rename a Zotero collection without changing its parent."""
+    async def rename_collection(
+        collection_id: str,
+        new_name: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """Rename a Zotero collection without changing its parent.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         new_name = new_name.strip()
         if not new_name:
             return tool_error("Collection name must not be empty")
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             collection = await _zot_call(zot.collection, collection_id)
             data = collection.get("data", {})
             old_name = data.get("name", collection_id)
@@ -283,13 +340,19 @@ def register(mcp):
     async def move_collection(
         collection_id: str,
         parent_collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
-        """Move a collection under another collection, or to the library root."""
+        """Move a collection under another collection, or to the library root.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         if collection_id == parent_collection_id:
             return tool_error("A collection cannot be its own parent")
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             collection = await _zot_call(zot.collection, collection_id)
             if parent_collection_id:
                 parent = await _zot_call(zot.collection, parent_collection_id)

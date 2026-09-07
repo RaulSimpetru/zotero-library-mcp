@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from typing import Literal
 
 import httpx
 
@@ -67,7 +68,12 @@ async def _validate_collection(zot, collection_id: str | None) -> None:
 
 def register(mcp):
     @mcp.tool(annotations=WRITE_OPEN_WORLD)
-    async def add_paper_by_doi(doi: str, collection_id: str | None = None) -> str:
+    async def add_paper_by_doi(
+        doi: str,
+        collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add a paper to your Zotero library by its DOI.
 
         Resolves metadata automatically via CrossRef and creates the item in Zotero.
@@ -76,10 +82,13 @@ def register(mcp):
         Args:
             doi: The DOI of the paper (e.g. "10.1038/nature12373")
             collection_id: Optional Zotero collection key to add the paper to
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             doi = _normalize_doi(doi)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _validate_collection(zot, collection_id)
             duplicate = await _find_duplicate(zot, field="DOI", value=doi)
             if duplicate:
@@ -129,12 +138,17 @@ def register(mcp):
         dois: list[str],
         collection_id: str | None = None,
         attach_pdfs: bool = False,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Add multiple papers to Zotero by their DOIs (batch, up to 50).
 
         Args:
             dois: List of DOIs to add
             collection_id: Optional Zotero collection key to add all papers to
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         if not dois:
             return tool_error("At least one DOI is required.")
@@ -159,7 +173,7 @@ def register(mcp):
                 normalized_dois.append(doi)
 
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _validate_collection(zot, collection_id)
         except Exception as exc:
             return tool_error(f"Could not validate batch import: {exc}")
@@ -242,7 +256,12 @@ def register(mcp):
         return "\n".join(lines)
 
     @mcp.tool(annotations=WRITE_OPEN_WORLD)
-    async def add_paper_by_arxiv_id(arxiv_id: str, collection_id: str | None = None) -> str:
+    async def add_paper_by_arxiv_id(
+        arxiv_id: str,
+        collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add a paper to your Zotero library by its arXiv ID.
 
         Fetches metadata from the arXiv API. If the paper has a DOI, resolves it
@@ -252,6 +271,9 @@ def register(mcp):
         Args:
             arxiv_id: The arXiv ID of the paper (e.g. "2301.07041")
             collection_id: Optional Zotero collection key to add the paper to
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         arxiv_id = arxiv_id.strip()
         arxiv_id = re.sub(r"^https?://arxiv\.org/(?:abs|pdf)/", "", arxiv_id, flags=re.I)
@@ -261,7 +283,7 @@ def register(mcp):
             return tool_error(f"Invalid arXiv ID: {arxiv_id}")
 
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _validate_collection(zot, collection_id)
             arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
             existing_items = await _zot_call(
@@ -329,7 +351,12 @@ def register(mcp):
             return tool_error(f"Unexpected response from Zotero: {result}")
 
     @mcp.tool(annotations=WRITE_OPEN_WORLD)
-    async def add_book_by_isbn(isbn: str, collection_id: str | None = None) -> str:
+    async def add_book_by_isbn(
+        isbn: str,
+        collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add a book to your Zotero library by its ISBN.
 
         Resolves metadata automatically via Open Library and creates the item in Zotero.
@@ -338,6 +365,9 @@ def register(mcp):
         Args:
             isbn: The ISBN of the book (e.g. "9780262046824")
             collection_id: Optional Zotero collection key to add the book to
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             isbn = _normalize_isbn(isbn)
@@ -345,7 +375,7 @@ def register(mcp):
             return tool_error(str(exc))
 
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _validate_collection(zot, collection_id)
             duplicate = await _find_duplicate(zot, field="ISBN", value=isbn)
             if duplicate:
@@ -392,11 +422,16 @@ def register(mcp):
         fields: dict[str, object] | None = None,
         creators: list[dict[str, str]] | None = None,
         collection_id: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Add an item from manual, CSL-like, or previously parsed metadata.
 
         The Zotero item template determines which fields are accepted for the
         requested item type, preventing invalid cross-type metadata.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
 
         title = title.strip()
@@ -405,7 +440,7 @@ def register(mcp):
         if creators and len(creators) > 200:
             return tool_error("A maximum of 200 creators is supported")
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _validate_collection(zot, collection_id)
             template = await _zot_call(zot.item_template, item_type)
         except Exception as exc:

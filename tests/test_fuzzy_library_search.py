@@ -60,7 +60,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.items.return_value = [FAKE_ITEMS[0]]
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Attention Is All You Need"))
         assert "Attention Is All You Need" in result
@@ -74,7 +74,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Atention Is All You Need"))
         assert "Attention Is All You Need" in result
@@ -88,7 +88,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("quantum teleportation xyz"))
         assert result == "No results."
@@ -101,7 +101,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.top.return_value = FAKE_ITEMS
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Goodfelow"))
         assert "Generative Adversarial" in result
@@ -118,7 +118,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.top.return_value = items_with_attachment
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Atention Is All"))
         assert "Some PDF" not in result
@@ -136,7 +136,7 @@ class TestFuzzyLibrarySearch:
         mock_zot.top.return_value = deep_items
 
         import zotero_mcp.library as lib_mod
-        monkeypatch.setattr(lib_mod, "_get_zot", lambda: mock_zot)
+        monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["search_library"]("Deep Learning", limit=3))
         item_lines = [line for line in result.split("\n") if line.startswith("[")]

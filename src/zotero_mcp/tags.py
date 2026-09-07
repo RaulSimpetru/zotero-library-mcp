@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from typing import Literal
 
 from ._helpers import _get_zot, _validate_limit, _zot_call
 from .responses import tool_error
@@ -54,15 +55,22 @@ async def _put_tag_colors(zot, colors: list[dict], version: int) -> None:
 
 def register(mcp):
     @mcp.tool(annotations=READ_ONLY)
-    async def list_tags(limit: int = 100) -> str:
+    async def list_tags(
+        limit: int = 100,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """List all tags in your Zotero library.
 
         Args:
             limit: Maximum number of tags to return (default 100)
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=1000)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             all_tags = await _zot_call(lambda: zot.everything(zot.tags()))
         except Exception as e:
             return tool_error(f"Could not fetch tags: {e}")
@@ -78,15 +86,22 @@ def register(mcp):
         return f"Tags ({total} total, showing {len(sorted_tags)}):\n" + "\n".join(sorted_tags)
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_tags(tags: list[str]) -> str:
+    async def delete_tags(
+        tags: list[str],
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Delete tags from the entire Zotero library. This removes the tags from all items.
 
         Args:
             tags: List of tag names to delete from the library
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             await _zot_call(zot.delete_tags, *tags)
         except Exception as e:
             return tool_error(f"Failed to delete tags: {e}")
@@ -94,13 +109,22 @@ def register(mcp):
         return f"Deleted {len(tags)} tag(s) from library: {', '.join(tags)}"
 
     @mcp.tool(annotations=WRITE)
-    async def add_tags(item_key: str, tags: list[str], color: str | None = None) -> str:
+    async def add_tags(
+        item_key: str,
+        tags: list[str],
+        color: str | None = None,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Add one or more tags to a Zotero item. Optionally assign a color to all added tags.
 
         Args:
             item_key: The Zotero item key
             tags: List of tags to add
             color: Optional hex color code (e.g. '#FF0000') to assign to the added tags
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
@@ -108,7 +132,7 @@ def register(mcp):
             color_version = 0
             if color:
                 color = _validate_color(color)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             if color:
                 existing_colors, color_version = await _get_tag_colors(zot)
                 new_names = {
@@ -162,16 +186,24 @@ def register(mcp):
         return result
 
     @mcp.tool(annotations=WRITE)
-    async def remove_tags(item_key: str, tags: list[str]) -> str:
+    async def remove_tags(
+        item_key: str,
+        tags: list[str],
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Remove one or more tags from a Zotero item.
 
         Args:
             item_key: The Zotero item key
             tags: List of tags to remove
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
         except Exception as exc:
             return tool_error(f"Invalid tag request: {exc}")
 
@@ -199,13 +231,22 @@ def register(mcp):
         return f"Removed {removed_count} tag(s) from '{title}'."
 
     @mcp.tool(annotations=WRITE)
-    async def set_tag_color(tag: str, color: str, position: int = 0) -> str:
+    async def set_tag_color(
+        tag: str,
+        color: str,
+        position: int = 0,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Assign a color to a tag in the Zotero library. Colored tags appear in the tag selector and item lists.
 
         Args:
             tag: The tag name to colorize
             color: Hex color code (e.g. '#FF0000' for red, '#3366CC' for blue)
             position: Sort position for the colored tag (0-8, lower = higher priority)
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         try:
             tag = tag.strip()
@@ -214,7 +255,7 @@ def register(mcp):
             color = _validate_color(color)
             if not 0 <= position <= 8:
                 raise ValueError("position must be between 0 and 8")
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             tag_colors, version = await _get_tag_colors(zot)
             folded = tag.casefold()
             tag_colors = [
@@ -232,12 +273,20 @@ def register(mcp):
         return f"Set color {color} on tag '{tag}' at position {position}."
 
     @mcp.tool(annotations=WRITE)
-    async def rename_tag(old_name: str, new_name: str) -> str:
+    async def rename_tag(
+        old_name: str,
+        new_name: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
         """Rename a tag across all items in the Zotero library.
 
         Args:
             old_name: The current tag name
             new_name: The new tag name to replace it with
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
         """
         old_name = old_name.strip()
         new_name = new_name.strip()
@@ -245,7 +294,7 @@ def register(mcp):
             return tool_error("old_name and new_name must not be empty")
         if old_name.casefold() == new_name.casefold():
             return "Tag already has the requested name."
-        zot = _get_zot()
+        zot = _get_zot(library_id, library_type)
 
         try:
             items = await _zot_call(lambda: zot.everything(zot.items(tag=old_name)))
@@ -322,14 +371,22 @@ def register(mcp):
         return result
 
     @mcp.tool(annotations=WRITE)
-    async def unset_tag_color(tag: str) -> str:
-        """Remove a tag's assigned library color without deleting the tag."""
+    async def unset_tag_color(
+        tag: str,
+        library_id: str | None = None,
+        library_type: Literal["user", "group"] | None = None,
+    ) -> str:
+        """Remove a tag's assigned library color without deleting the tag.
+
+        Pass both library_id and library_type to target another library;
+        omit both to use the configured default.
+        """
 
         tag = tag.strip()
         if not tag:
             return tool_error("tag must not be empty")
         try:
-            zot = _get_zot()
+            zot = _get_zot(library_id, library_type)
             colors, version = await _get_tag_colors(zot)
             folded = tag.casefold()
             remaining = [

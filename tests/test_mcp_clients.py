@@ -114,6 +114,8 @@ def test_download_progress_context_is_not_exposed_as_tool_input():
     assert set(tools["download_pdf"].input_schema["properties"]) == {
         "item_key",
         "attachment_key",
+        "library_id",
+        "library_type",
     }
 
 
@@ -130,6 +132,7 @@ def test_file_resource_templates_preserve_media_types():
 def test_high_value_tools_are_registered():
     names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert {
+        "list_libraries",
         "health_check",
         "list_attachments",
         "update_item_metadata",
