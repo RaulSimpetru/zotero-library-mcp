@@ -1,0 +1,15 @@
+{
+  "name": "zotero-library-mcp",
+  "description": "Claude Code plugin for the Zotero MCP server (zotero-library-mcp).",
+  "owner": {
+    "name": "Raul C. Sîmpetru",
+    "email": "raul.simpetru@fau.de"
+  },
+  "plugins": [
+    {
+      "name": "zotero",
+      "source": "./",
+      "description": "Zotero library tools: search, read, annotate, add papers, export BibTeX."
+    }
+  ]
+}

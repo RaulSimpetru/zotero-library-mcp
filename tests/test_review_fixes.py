@@ -870,3 +870,16 @@ def test_list_tags_pages_past_zoteros_missing_next_links(monkeypatch):
     monkeypatch.setattr(tags_mod, "_get_zot", lambda *_args: zot)
     result = asyncio.run(_register(tags_mod)["list_tags"](limit=5))
     assert result.startswith("Tags (256 total")
+
+
+def test_plugin_pins_the_released_package_version():
+    root = Path(__file__).resolve().parents[1]
+    version = re.search(r'^version = "([^"]+)"', (root / "pyproject.toml").read_text(), re.M).group(1)
+    plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text())
+    server = json.loads((root / "server.json").read_text())
+    assert plugin["version"] == version
+    assert f"zotero-library-mcp=={version}" in plugin["mcpServers"]["zotero"]["args"]
+    assert server["version"] == version
+    # Every ${user_config.X} the server uses must be declared.
+    env = json.dumps(plugin["mcpServers"]["zotero"]["env"])
+    assert set(re.findall(r"\$\{user_config\.(\w+)\}", env)) <= set(plugin["userConfig"])

@@ -338,7 +338,8 @@ def _get_zot(
         raise ValueError("Pass both library_id and library_type, or omit both")
     if library_id is None:
         library_id = os.environ.get("ZOTERO_LIBRARY_ID", "")
-        library_type = os.environ.get("ZOTERO_LIBRARY_TYPE", "user")
+        # ``or``: plugin installs pass unset optional settings as "".
+        library_type = os.environ.get("ZOTERO_LIBRARY_TYPE") or "user"
     api_key = os.environ.get("ZOTERO_API_KEY", "")
     if not library_id or not api_key:
         raise ValueError(
@@ -597,7 +598,7 @@ def _use_webdav(zot: zotero.Zotero) -> bool:
         return False
     if str(zot.library_id) != os.environ.get("ZOTERO_LIBRARY_ID", ""):
         return False
-    if os.environ.get("ZOTERO_LIBRARY_TYPE", "user") != "user":
+    if (os.environ.get("ZOTERO_LIBRARY_TYPE") or "user") != "user":
         return False
     return all(_webdav_config())
 

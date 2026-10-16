@@ -1,0 +1,72 @@
+{
+  "name": "zotero",
+  "version": "0.10.2",
+  "description": "Search, read, annotate, and manage your Zotero library: add papers by DOI, arXiv ID, or ISBN, highlight PDFs, export BibTeX.",
+  "author": { "name": "Raul C. Sîmpetru", "email": "raul.simpetru@fau.de" },
+  "homepage": "https://github.com/RaulSimpetru/zotero-library-mcp",
+  "repository": "https://github.com/RaulSimpetru/zotero-library-mcp",
+  "license": "MIT",
+  "keywords": ["zotero", "references", "citations", "pdf", "bibtex"],
+  "userConfig": {
+    "library_id": {
+      "type": "string",
+      "title": "Zotero library ID",
+      "description": "Your numeric user ID from https://www.zotero.org/settings/keys (or a group ID).",
+      "required": true
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Zotero API key",
+      "description": "Create one at https://www.zotero.org/settings/keys (allow write access to add items).",
+      "required": true,
+      "sensitive": true
+    },
+    "library_type": {
+      "type": "string",
+      "title": "Library type",
+      "description": "Default library: your personal library (user) or a group.",
+      "options": ["user", "group"],
+      "default": "user"
+    },
+    "unpaywall_email": {
+      "type": "string",
+      "title": "Email for open-access PDF lookup (optional)",
+      "description": "Lets DOI imports attach open-access PDFs via Unpaywall; also used as the CrossRef contact.",
+      "default": ""
+    },
+    "webdav_url": {
+      "type": "string",
+      "title": "WebDAV URL (optional)",
+      "description": "Only if Zotero syncs files via WebDAV, e.g. https://nas.example:5006 (without /zotero).",
+      "default": ""
+    },
+    "webdav_user": {
+      "type": "string",
+      "title": "WebDAV username (optional)",
+      "description": "WebDAV account name.",
+      "default": ""
+    },
+    "webdav_password": {
+      "type": "string",
+      "title": "WebDAV password (optional)",
+      "description": "WebDAV account password.",
+      "default": "",
+      "sensitive": true
+    }
+  },
+  "mcpServers": {
+    "zotero": {
+      "command": "uvx",
+      "args": ["--from", "zotero-library-mcp==0.10.2", "zotero-mcp"],
+      "env": {
+        "ZOTERO_LIBRARY_ID": "${user_config.library_id}",
+        "ZOTERO_API_KEY": "${user_config.api_key}",
+        "ZOTERO_LIBRARY_TYPE": "${user_config.library_type}",
+        "UNPAYWALL_EMAIL": "${user_config.unpaywall_email}",
+        "ZOTERO_WEBDAV_URL": "${user_config.webdav_url}",
+        "ZOTERO_WEBDAV_USER": "${user_config.webdav_user}",
+        "ZOTERO_WEBDAV_PASSWORD": "${user_config.webdav_password}"
+      }
+    }
+  }
+}

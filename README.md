@@ -119,6 +119,26 @@ With `env_vars`, start Codex/ChatGPT from an environment that contains those var
 
 ### Claude Code
 
+Install it as a plugin (recommended):
+
+```
+/plugin install zotero --marketplace RaulSimpetru/zotero-library-mcp
+```
+
+On older Claude Code versions, run `/plugin marketplace add RaulSimpetru/zotero-library-mcp`
+first, then `/plugin install zotero@zotero-library-mcp`. Claude Code asks for your
+library ID and API key (plus optional WebDAV and Unpaywall settings) when you enable
+the plugin, and keeps the API key and WebDAV password in your system keychain. To get
+a new release, run `/plugin marketplace update zotero-library-mcp`, or turn on
+auto-update for the marketplace in `/plugin`.
+
+Plugin tools are named `mcp__plugin_zotero_zotero__<tool>` rather than `mcp__zotero__<tool>`;
+update any permission rules that name the old tools. If you previously added the
+server with `claude mcp add`, remove that entry (`claude mcp remove zotero -s user`)
+so the two copies don't both run.
+
+Or add it as a plain MCP server:
+
 ```bash
 claude mcp add zotero \
   -e ZOTERO_LIBRARY_ID=your_library_id \
@@ -274,6 +294,12 @@ configured personal library, even when the same server accesses shared groups.
 | `ZOTERO_MCP_FILE_ROOTS` | No | Comma-separated allowed roots when HTTP server paths are enabled |
 
 > **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, attachments in the configured personal library use WebDAV instead of Zotero's built-in storage. Group attachments always use Zotero storage. The server automatically appends `/zotero` to the WebDAV base URL, matching Zotero Desktop's behavior.
+
+## Version 0.10.2
+
+- Install as a Claude Code plugin: `/plugin install zotero --marketplace RaulSimpetru/zotero-library-mcp`.
+- An empty `ZOTERO_LIBRARY_TYPE` now means the default (`user`), as plugin
+  installs pass unset optional settings as empty strings.
 
 ## Version 0.10.1
 
