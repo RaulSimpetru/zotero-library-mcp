@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 
 import jwt
@@ -41,16 +42,37 @@ def oauth_config_from_env() -> OAuthConfig | None:
     return OAuthConfig(issuer, resource, jwks, scopes)
 
 
+JWKS_REFRESH_INTERVAL_SECONDS = 60.0
+
+
 class JWTTokenVerifier:
     """Verify externally issued JWT access tokens against a JWKS endpoint."""
 
     def __init__(self, config: OAuthConfig):
         self.config = config
         self._jwks = jwt.PyJWKClient(config.jwks_url, cache_keys=True)
+        self._last_forced_refresh = float("-inf")
+
+    def _signing_key(self, token: str) -> jwt.PyJWK:
+        kid = jwt.get_unverified_header(token).get("kid")
+        for key in self._jwks.get_signing_keys():  # cached key set
+            if key.key_id == kid:
+                return key
+        # PyJWT refetches the JWKS for every unknown kid, so random kids from
+        # unauthenticated callers would hammer the issuer. Allow key rotation,
+        # but refetch at most once per interval.
+        now = time.monotonic()
+        if now - self._last_forced_refresh < JWKS_REFRESH_INTERVAL_SECONDS:
+            raise jwt.PyJWKClientError(f"Unknown signing key: {kid}")
+        self._last_forced_refresh = now
+        for key in self._jwks.get_signing_keys(refresh=True):
+            if key.key_id == kid:
+                return key
+        raise jwt.PyJWKClientError(f"Unknown signing key: {kid}")
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            signing_key = await asyncio.to_thread(self._jwks.get_signing_key_from_jwt, token)
+            signing_key = await asyncio.to_thread(self._signing_key, token)
             algorithm = signing_key.algorithm_name or "RS256"
             claims = await asyncio.to_thread(
                 jwt.decode,

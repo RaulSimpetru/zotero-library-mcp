@@ -35,7 +35,7 @@ def sanitize_error_message(message: str) -> str:
         except Exception:
             return "[redacted URL]"
 
-    sanitized = re.sub(r"https?://[^\s]+", _redact_url, sanitized)
+    sanitized = re.sub(r"https?://[^\s]+", _redact_url, sanitized, flags=re.I)
     try:
         home = str(Path.home())
         if home and home != "/":

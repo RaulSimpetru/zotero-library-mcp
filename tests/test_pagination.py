@@ -36,12 +36,12 @@ class TestSearchLibraryPagination:
     def test_start_and_limit_passed_through(self, monkeypatch):
         registered = _setup(lib_mod.register)
         zot = _mock_zot()
-        zot.items.return_value = [_make_item("Paper A", key="K100")]
+        zot.top.return_value = [_make_item("Paper A", key="K100")]
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("deep", limit=100, start=100))
 
-        zot.items.assert_called_once_with(q="deep", limit=100, start=100)
+        zot.top.assert_called_once_with(q="deep", limit=100, start=100)
         assert "Paper A" in result
         assert "Showing items 101–101 of 566." in result
         assert "start=101" in result
@@ -56,18 +56,18 @@ class TestSearchLibraryPagination:
     def test_paging_past_exact_results_does_not_go_fuzzy(self, monkeypatch):
         registered = _setup(lib_mod.register)
         zot = _mock_zot(total="30")
-        zot.items.return_value = []
+        zot.top.return_value = []
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("deep", start=30))
         assert "No more results." in result
         assert "fuzzy" not in result.lower()
-        zot.top.assert_not_called()
+        zot.top.assert_called_once()  # the exact query only, no fuzzy corpus fetch
 
     def test_footer_when_complete_has_no_next_page_hint(self, monkeypatch):
         registered = _setup(lib_mod.register)
         zot = _mock_zot(total="1")
-        zot.items.return_value = [_make_item("Only One")]
+        zot.top.return_value = [_make_item("Only One")]
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: zot)
 
         result = asyncio.run(registered["search_library"]("only"))

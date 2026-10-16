@@ -6,6 +6,7 @@ from typing import Literal
 from ._helpers import (
     _fmt_item,
     _get_zot,
+    _patch_item,
     _page_footer,
     _total_results,
     _validate_limit,
@@ -38,9 +39,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """List all collections in your Zotero library.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             zot = _get_zot(library_id, library_type)
@@ -102,13 +100,9 @@ def register(mcp):
         Args:
             item_key: The Zotero item key (from search results)
             collection_id: The collection key to add it to
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             await _zot_call(zot.collection, collection_id)
             item = await _zot_call(zot.item, item_key)
         except Exception as e:
@@ -120,11 +114,12 @@ def register(mcp):
         if collection_id in collections:
             return f"Item is already in collection {collection_id}."
 
-        collections.append(collection_id)
-        data["collections"] = collections
-
         try:
-            await _zot_call(zot.update_item, data)
+            # Partial PATCH: works for trashed items, unlike update_item.
+            await _zot_call(
+                _patch_item, zot, data.get("key", item_key), int(data.get("version", item.get("version"))),
+                {"collections": [*collections, collection_id]},
+            )
         except Exception as e:
             return tool_error(f"Failed to update item: {e}")
 
@@ -142,13 +137,9 @@ def register(mcp):
         Args:
             item_key: The Zotero item key
             collection_id: The collection key to remove it from
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             await _zot_call(zot.collection, collection_id)
             item = await _zot_call(zot.item, item_key)
         except Exception as e:
@@ -181,16 +172,12 @@ def register(mcp):
         Args:
             name: Name for the new collection
             parent_collection_id: Optional parent collection key to nest under
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         name = name.strip()
         if not name:
             return tool_error("Collection name must not be empty")
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             if parent_collection_id:
                 await _zot_call(zot.collection, parent_collection_id)
             existing, _ = await _collections_bounded(zot)
@@ -241,13 +228,9 @@ def register(mcp):
 
         Args:
             collection_id: The collection key to delete
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             col = await _zot_call(zot.collection, collection_id)
         except Exception as e:
             return tool_error(f"Could not find collection {collection_id}: {e}")
@@ -276,9 +259,6 @@ def register(mcp):
             limit: Maximum number of items to return per page (default 25, max 100)
             start: Offset of the first item; pass the value suggested by the
                 previous call's footer to fetch the next page (default 0)
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=100)
@@ -317,9 +297,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Rename a Zotero collection without changing its parent.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         new_name = new_name.strip()
@@ -344,9 +321,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Move a collection under another collection, or to the library root.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         if collection_id == parent_collection_id:

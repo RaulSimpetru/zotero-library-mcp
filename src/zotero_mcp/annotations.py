@@ -15,18 +15,20 @@ from mcp.server.mcpserver import Context
 
 from ._helpers import (
     MAX_ATTACHMENT_BYTES,
+    _all_children,
     _attach_file_local,
     _attach_file_webdav,
     _download_file_from_url,
     _download_pdf,
     _get_zot,
+    _patch_item,
     _use_webdav,
     _validate_limit,
     _zot_call,
 )
 from .file_resources import register_temp_resource
-from .responses import resource_result, tool_error
-from .runtime import OpenAIFile, validate_server_path
+from .responses import resource_result, sanitize_error_message, tool_error
+from .runtime import OpenAIFile, atomic_write, open_server_file, validate_server_path
 from .tool_annotations import DESTRUCTIVE, READ_ONLY, WRITE
 
 HIGHLIGHT_COLORS = ["#ffd400", "#ff6666", "#5fb236", "#2ea8e5", "#a28ae5"]
@@ -108,20 +110,16 @@ def register(mcp):
         Args:
             item_key: The parent Zotero item key to attach the note to
             note: The note content (plain text or HTML)
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         if not note.strip():
             return tool_error("note must not be empty")
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             await _zot_call(zot.item, item_key)
+            template = await _zot_call(zot.item_template, "note")
         except Exception as e:
             return tool_error(f"Could not find item {item_key}: {e}")
 
-        template = await _zot_call(zot.item_template, "note")
         template["note"] = note
 
         try:
@@ -154,8 +152,8 @@ def register(mcp):
         """Highlight a text passage in a PDF attached to a Zotero item.
 
         Searches the PDF for the quoted text and creates a visible highlight
-        annotation in Zotero's PDF reader. Uses three strategies in order:
-        exact match, normalized word match, and fuzzy match (for OCR errors,
+        annotation in Zotero's PDF reader. Tries a normalized word match first,
+        then fuzzy matching (for OCR errors,
         hyphenation differences, or minor transcription mismatches).
 
         Smart overlap handling:
@@ -177,9 +175,6 @@ def register(mcp):
             attachment_key: Optional PDF attachment key when the item has multiple PDFs
             page_number: Optional one-based page number to search
             occurrence: One-based occurrence to highlight when text repeats
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             quoted_text = quoted_text.strip()
@@ -206,54 +201,6 @@ def register(mcp):
             return tool_error(f"Could not download PDF: {e}")
 
         try:
-            # --- Overlap detection against existing highlights ---
-            existing_anns = []
-            try:
-                att_children = await _zot_call(zot.children, att_key)
-                for ann in att_children:
-                    d = ann.get("data", {})
-                    if d.get("itemType") == "annotation" and d.get("annotationType") == "highlight":
-                        existing_anns.append(d)
-            except Exception:
-                pass
-
-            normalized_new = _normalize_text(quoted_text).lower()
-            for ann in existing_anns:
-                existing_text = _normalize_text(ann.get("annotationText", "")).lower()
-
-                if normalized_new == existing_text:
-                    ann_key = ann.get("key")
-                    ann_version = ann.get("version")
-                    old_comment = ann.get("annotationComment", "")
-                    separator = "\n---\n" if old_comment else ""
-                    new_full_comment = old_comment + separator + comment
-                    if comment:
-                        await _zot_call(
-                            zot.update_item,
-                            {
-                                "key": ann_key,
-                                "version": ann_version,
-                                "annotationComment": new_full_comment,
-                            },
-                        )
-                        return f"Updated existing highlight [{ann_key}]: appended comment"
-                    return f"Highlight [{ann_key}] already exists; no duplicate created"
-
-                elif normalized_new in existing_text:
-                    if color == DEFAULT_HIGHLIGHT_COLOR:
-                        existing_color = ann.get("annotationColor", DEFAULT_HIGHLIGHT_COLOR)
-                        color = next((c for c in HIGHLIGHT_COLORS if c != existing_color), "#ff6666")
-                    break
-
-                elif existing_text in normalized_new:
-                    if color == DEFAULT_HIGHLIGHT_COLOR:
-                        existing_color = ann.get("annotationColor", DEFAULT_HIGHLIGHT_COLOR)
-                        color = next(
-                            (candidate for candidate in HIGHLIGHT_COLORS if candidate != existing_color),
-                            "#ff6666",
-                        )
-                    break
-
             doc = fitz.open(tmp_path)
             if page_number is not None and page_number > doc.page_count:
                 return tool_error(
@@ -261,95 +208,147 @@ def register(mcp):
                 )
             found_rects = []
             found_page = None
+            match_offset = 0
 
             search_norm = _normalize_text(quoted_text).lower()
-
-            # Strategy 1: PyMuPDF's built-in search
             pages = [doc[page_number - 1]] if page_number is not None else list(doc)
-            remaining_occurrence = occurrence
+            page_words = []
             for page in pages:
-                rects = page.search_for(quoted_text)
-                if rects:
-                    if remaining_occurrence > len(rects):
-                        remaining_occurrence -= len(rects)
-                        continue
-                    found_rects = [rects[remaining_occurrence - 1]]
+                words = page.get_text("words")
+                # Lower each word before measuring: lower() can change length
+                # (e.g. "İ"), which would shift offsets in the joined text.
+                word_texts = [_normalize_text(w[4]).lower() for w in words]
+                page_words.append((page, words, word_texts, " ".join(word_texts)))
+
+            # Strategy 1: normalized word search. Word boxes cover matches that
+            # wrap across lines, and occurrences are counted across pages.
+            # Whole-word matches win ("cat" must not highlight "concatenate");
+            # partial-word quotes fall back to substring matches.
+            whole = re.compile(r"(?<!\w)" + re.escape(search_norm) + r"(?!\w)")
+            partial = re.compile(re.escape(search_norm))
+            pattern = whole if any(whole.search(text) for *_, text in page_words) else partial
+            total_hits = 0
+            for page, words, word_texts, full_text in page_words:
+                hits = [m.start() for m in pattern.finditer(full_text)]
+                if total_hits + len(hits) < occurrence:
+                    total_hits += len(hits)
+                    continue
+                pos = hits[occurrence - total_hits - 1]
+                total_hits = occurrence
+                char_count = 0
+                match_rects = []
+                for i, w in enumerate(words):
+                    word_start = char_count
+                    word_end = char_count + len(word_texts[i])
+                    if word_end > pos and word_start < pos + len(search_norm):
+                        match_rects.append(fitz.Rect(w[0], w[1], w[2], w[3]))
+                    char_count = word_end + 1
+                if match_rects:
+                    found_rects = match_rects
                     found_page = page
+                    match_offset = pos
                     break
 
-            # Strategy 2: word-based search with normalization
-            if not found_rects:
-                for page in pages:
-                    words = page.get_text("words")
-                    if not words:
-                        continue
-                    word_texts = [_normalize_text(w[4]) for w in words]
-                    full_text = " ".join(word_texts).lower()
-                    pos = -1
-                    start = 0
-                    for _ in range(occurrence):
-                        pos = full_text.find(search_norm, start)
-                        if pos < 0:
-                            break
-                        start = pos + max(1, len(search_norm))
-                    if pos < 0:
-                        continue
-                    char_count = 0
-                    match_rects = []
-                    for i, w in enumerate(words):
-                        word_start = char_count
-                        word_end = char_count + len(word_texts[i])
-                        if word_end > pos and word_start < pos + len(search_norm):
-                            match_rects.append(fitz.Rect(w[0], w[1], w[2], w[3]))
-                        char_count = word_end + 1
-                    if match_rects:
-                        found_rects = match_rects
-                        found_page = page
-                        break
+            if not found_rects and total_hits and occurrence > total_hits:
+                return tool_error(
+                    f"occurrence {occurrence} not found: the text appears {total_hits} time(s)"
+                )
 
-            # Strategy 3: fuzzy matching fallback
+            # Strategy 2: fuzzy matching fallback. It cannot count occurrences,
+            # so it only stands in for the first one.
             fuzzy_matched_text = None
-            if not found_rects:
+            if not found_rects and occurrence == 1:
                 best_page = None
                 best_rects = None
                 best_text = None
                 best_dist = None
-                for page in pages:
-                    words = page.get_text("words")
+                for page, words, word_texts, _text in page_words:
                     if not words:
                         continue
-                    word_texts = [_normalize_text(w[4]) for w in words]
                     rects, matched, dist = _fuzzy_find_in_page(
                         words, word_texts, search_norm, max_l_dist
                     )
                     if rects and (best_dist is None or dist < best_dist):
                         best_dist = dist
-                        best_page = page
+                        best_page = (page, words, word_texts)
                         best_rects = rects
                         best_text = matched
                 if best_rects:
+                    found_page, words, word_texts = best_page
                     found_rects = best_rects
-                    found_page = best_page
                     fuzzy_matched_text = best_text
+                    # Character offset of the first matched word, for sorting.
+                    first = next(
+                        i for i, w in enumerate(words)
+                        if fitz.Rect(w[0], w[1], w[2], w[3]) == best_rects[0]
+                    )
+                    match_offset = sum(len(text) + 1 for text in word_texts[:first])
 
             if not found_rects or found_page is None:
                 return tool_error(f"Text not found in PDF: \"{quoted_text[:80]}...\"")
 
             page_index = found_page.number
-            page_label = str(page_index + 1)
-            itm = ~found_page.transformation_matrix
+            page_label = found_page.get_label() or str(page_index + 1)
+            # Word boxes are in unrotated, CropBox-relative coordinates with y
+            # down. Zotero wants PDF user space (y up). The page's
+            # transformation_matrix drops the box origin on rotated pages.
+            crop_x0 = found_page.cropbox.x0
+            crop_top = found_page.mediabox.y1 - found_page.cropbox.y0
             rects_list = [
-                [
-                    itm.a * r.x0 + itm.e,
-                    itm.d * r.y1 + itm.f,
-                    itm.a * r.x1 + itm.e,
-                    itm.d * r.y0 + itm.f,
-                ]
+                [crop_x0 + r.x0, crop_top - r.y1, crop_x0 + r.x1, crop_top - r.y0]
                 for r in found_rects
             ]
 
-            y_pos = int(found_rects[0].y0)
-            sort_index = f"{page_index:05d}|000000|{y_pos:05d}"
+            # Zotero's format: page | character offset | distance from top.
+            y_pos = max(0, int(found_rects[0].y0))
+            sort_index = f"{page_index:05d}|{min(match_offset, 999999):06d}|{y_pos:05d}"
+
+            # --- Existing highlights at this spot (same page, overlapping rects) ---
+            def _overlaps(position: str) -> bool:
+                try:
+                    existing = json.loads(position)
+                except (TypeError, ValueError):
+                    return False
+                if existing.get("pageIndex") != page_index:
+                    return False
+                return any(
+                    a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+                    for a in existing.get("rects", [])
+                    for b in rects_list
+                )
+
+            existing_anns = []
+            try:
+                for ann in await _all_children(zot, att_key):
+                    d = ann.get("data", {})
+                    if (
+                        d.get("itemType") == "annotation"
+                        and d.get("annotationType") == "highlight"
+                        and _overlaps(d.get("annotationPosition", ""))
+                    ):
+                        existing_anns.append(d)
+            except Exception:
+                pass
+
+            normalized_new = _normalize_text(fuzzy_matched_text or quoted_text).lower()
+            # Exact duplicates first, so an earlier overlapping highlight
+            # cannot hide one.
+            for ann in existing_anns:
+                if _normalize_text(ann.get("annotationText", "")).lower() == normalized_new:
+                    ann_key = ann.get("key")
+                    if not comment:
+                        return f"Highlight [{ann_key}] already exists; no duplicate created"
+                    old_comment = ann.get("annotationComment", "")
+                    separator = "\n---\n" if old_comment else ""
+                    await _zot_call(
+                        _patch_item, zot, ann_key, int(ann.get("version")),
+                        {"annotationComment": old_comment + separator + comment},
+                    )
+                    return f"Updated existing highlight [{ann_key}]: appended comment"
+            if existing_anns and color == DEFAULT_HIGHLIGHT_COLOR:
+                # Overlapping but different passage: use a contrasting color.
+                used = {ann.get("annotationColor", DEFAULT_HIGHLIGHT_COLOR) for ann in existing_anns}
+                color = next((c for c in HIGHLIGHT_COLORS if c not in used), "#ff6666")
 
             doc.close()
             doc = None
@@ -411,7 +410,7 @@ def register(mcp):
                         )
                     except Exception as exc:
                         Path(preview_path).unlink(missing_ok=True)
-                        return f"{msg}\nPreview unavailable: {exc}"
+                        return f"{msg}\nPreview unavailable: {sanitize_error_message(str(exc))}"
                     return resource_result(
                         msg,
                         uri=uri,
@@ -447,14 +446,11 @@ def register(mcp):
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
             limit: Maximum number of annotations to return (default 100)
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=500)
             zot = _get_zot(library_id, library_type)
-            children = await _zot_call(zot.children, item_key)
+            children = await _all_children(zot, item_key)
         except Exception as e:
             return tool_error(f"Could not find item {item_key}: {e}")
 
@@ -466,7 +462,7 @@ def register(mcp):
                 if not att_key:
                     continue
                 try:
-                    att_children = await _zot_call(zot.children, att_key)
+                    att_children = await _all_children(zot, att_key)
                 except Exception:
                     continue
                 for ann in att_children:
@@ -510,9 +506,6 @@ def register(mcp):
             item_key: The Zotero item key to attach the file to
             file: File object supplied by ChatGPT through openai/fileParams
             file_path: Local server path; stdio only unless HTTP roots are explicitly enabled
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         if (file is None) == (file_path is None):
             return tool_error("Provide exactly one of file or file_path")
@@ -522,7 +515,10 @@ def register(mcp):
         try:
             if file is not None:
                 extension = mimetypes.guess_extension(file.mime_type or "") or ""
-                safe_name = os.path.basename(file.file_name or f"attachment{extension}")
+                safe_name = os.path.basename(file.file_name or "")
+                if safe_name in ("", ".", ".."):
+                    # "..", "x/" and similar would name a directory, not a file.
+                    safe_name = f"attachment{extension}"
                 suffix = Path(safe_name).suffix[:16]
                 tmp_path, _ = await _download_file_from_url(
                     file.download_url,
@@ -535,23 +531,29 @@ def register(mcp):
                 tmp_path = None
                 filename = safe_name
             else:
-                source = validate_server_path(file_path or "")
-                if not source.is_file():
-                    return tool_error(f"File not found: {source}")
-                if source.stat().st_size > MAX_ATTACHMENT_BYTES:
-                    return tool_error("Attachment exceeds the 100 MB size limit")
-                source_path = str(source)
+                try:
+                    fd, source = open_server_file(file_path or "")
+                except FileNotFoundError:
+                    return tool_error(f"File not found: {file_path}")
+                # Copy from the checked descriptor, so swapping the path for a
+                # symlink after the check cannot change what gets uploaded.
+                with os.fdopen(fd, "rb") as handle:
+                    if os.fstat(handle.fileno()).st_size > MAX_ATTACHMENT_BYTES:
+                        return tool_error("Attachment exceeds the 100 MB size limit")
+                    temp_dir = tempfile.mkdtemp(prefix="zotero_upload_")
+                    source_path = str(Path(temp_dir) / source.name)
+                    with open(source_path, "wb") as copy:
+                        shutil.copyfileobj(handle, copy)
                 filename = source.name
         except Exception as exc:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            elif tmp_path:
+            if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
             return tool_error(f"Could not read attachment input: {exc}")
 
-        zot = _get_zot(library_id, library_type)
-
         try:
+            zot = _get_zot(library_id, library_type)
             await _zot_call(zot.item, item_key)
         except Exception as e:
             if temp_dir:
@@ -560,14 +562,12 @@ def register(mcp):
 
         try:
             if _use_webdav(zot):
-                result = await _attach_file_webdav(zot, item_key, source_path)
-                if result:
-                    return f"Attached '{filename}' to item {item_key} (via WebDAV)"
-                return tool_error("Failed to attach file via WebDAV")
-            result = await _attach_file_local(zot, item_key, source_path)
-            if not result:
-                return tool_error("Failed to attach file to Zotero storage")
+                await _attach_file_webdav(zot, item_key, source_path)
+                return f"Attached '{filename}' to item {item_key} (via WebDAV)"
+            await _attach_file_local(zot, item_key, source_path)
             return f"Attached '{filename}' to item {item_key}"
+        except Exception as exc:
+            return tool_error(f"Failed to attach file: {exc}")
         finally:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -590,16 +590,12 @@ def register(mcp):
         Args:
             item_key: The Zotero item key (the parent item, not the attachment)
             attachment_key: Optional PDF attachment key when the item has multiple PDFs
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
-        zot = _get_zot(library_id, library_type)
-
         async def report_progress(value: float, message: str) -> None:
             await ctx.report_progress(value, total=100, message=message)
 
         try:
+            zot = _get_zot(library_id, library_type)
             tmp_path, att_key = await _download_pdf(
                 zot,
                 item_key,
@@ -650,33 +646,29 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Save a Zotero PDF to an authorized local server path.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
-        zot = _get_zot(library_id, library_type)
         try:
+            zot = _get_zot(library_id, library_type)
             tmp_path, _ = await _download_pdf(zot, item_key, attachment_key)
         except Exception as exc:
             return tool_error(f"Could not download PDF: {exc}")
 
-        staging: Path | None = None
         try:
             destination = validate_server_path(save_path, for_write=True)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
-            shutil.copy2(tmp_path, staging)
-            os.replace(staging, destination)
-            staging = None
+
+            def _copy(output) -> None:
+                with open(tmp_path, "rb") as source:
+                    shutil.copyfileobj(source, output)
+
+            atomic_write(destination, _copy)
             size_mb = destination.stat().st_size / (1024 * 1024)
             return f"Saved PDF to {destination} ({size_mb:.1f} MB)"
         except Exception as e:
             return tool_error(f"Failed to save PDF: {e}")
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-            if staging is not None:
-                staging.unlink(missing_ok=True)
 
     @mcp.tool(annotations=READ_ONLY)
     async def list_notes(
@@ -686,15 +678,12 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> dict[str, object]:
         """List child notes for an item with bounded note content.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         try:
             limit = _validate_limit(limit, maximum=200)
             zot = _get_zot(library_id, library_type)
-            children = await _zot_call(zot.children, item_key)
+            children = await _all_children(zot, item_key)
         except Exception as exc:
             return tool_error(f"Could not list notes for {item_key}: {exc}")
 
@@ -724,9 +713,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Replace the content of an existing Zotero note.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         if not note.strip():
@@ -737,8 +723,8 @@ def register(mcp):
             data = item.get("data", {})
             if data.get("itemType") != "note":
                 return tool_error(f"Item {note_key} is not a note")
-            data["note"] = note
-            await _zot_call(zot.update_item, data)
+            # Partial PATCH: works for trashed notes, unlike update_item.
+            await _zot_call(_patch_item, zot, note_key, int(data["version"]), {"note": note})
             return f"Updated note [{note_key}]"
         except Exception as exc:
             return tool_error(f"Failed to update note: {exc}")
@@ -750,9 +736,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Permanently delete a Zotero note.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         try:
@@ -774,9 +757,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Update the comment and/or highlight color of an annotation.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         if comment is None and color is None:
@@ -789,11 +769,12 @@ def register(mcp):
             data = item.get("data", {})
             if data.get("itemType") != "annotation":
                 return tool_error(f"Item {annotation_key} is not an annotation")
+            changes: dict[str, object] = {}
             if comment is not None:
-                data["annotationComment"] = comment
+                changes["annotationComment"] = comment
             if color is not None:
-                data["annotationColor"] = color
-            await _zot_call(zot.update_item, data)
+                changes["annotationColor"] = color
+            await _zot_call(_patch_item, zot, annotation_key, int(data["version"]), changes)
             return f"Updated annotation [{annotation_key}]"
         except Exception as exc:
             return tool_error(f"Failed to update annotation: {exc}")
@@ -805,9 +786,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Permanently delete a Zotero annotation.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         try:

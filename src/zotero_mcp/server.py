@@ -10,7 +10,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import annotations, collections, libraries, library, papers, tags
-from .auth import build_mcp_auth, oauth_tool_meta
+from .auth import _csv_env, build_mcp_auth, oauth_tool_meta
 from .file_resources import read_temp_resource
 from .runtime import configure_runtime
 
@@ -40,6 +40,26 @@ mcp = MCPServer(
     auth=_auth_settings,
     token_verifier=_token_verifier,
 )
+
+_register_tool = mcp.tool
+
+
+def _tool(**kwargs: Any):
+    """Register a tool with a human title and optional OAuth metadata.
+
+    Wraps the public ``tool()`` decorator rather than editing the SDK's private
+    tool registry after the fact, which breaks across SDK releases.
+    """
+
+    def decorator(fn):
+        kwargs.setdefault("title", fn.__name__.replace("_", " ").title())
+        kwargs["meta"] = oauth_tool_meta(kwargs.get("meta"))
+        return _register_tool(**kwargs)(fn)
+
+    return decorator
+
+
+mcp.tool = _tool
 
 # Register all tool groups
 libraries.register(mcp)
@@ -71,26 +91,9 @@ def get_temporary_file(token: str) -> bytes:
     return read_temp_resource(token)
 
 
-def _apply_client_metadata() -> None:
-    """Add human titles and optional OAuth metadata to every registered tool."""
-
-    for name, tool in mcp._tool_manager._tools.items():
-        if not tool.title:
-            tool.title = name.replace("_", " ").title()
-        tool.meta = oauth_tool_meta(tool.meta)
-
-
-_apply_client_metadata()
-
-
 # ---------------------------------------------------------------------------
 # Entrypoint and transport configuration
 # ---------------------------------------------------------------------------
-
-def _csv_env(name: str) -> list[str]:
-    """Read a comma-separated environment variable into non-empty values."""
-    return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
-
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -116,7 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("ZOTERO_MCP_PORT", os.getenv("PORT", "8000"))),
+        # A string default goes through type=int, so a bad PORT gives a usage
+        # error instead of a traceback at import time.
+        default=os.getenv("ZOTERO_MCP_PORT", os.getenv("PORT", "8000")),
         help="HTTP bind port (default: 8000, or PORT)",
     )
     parser.add_argument(

@@ -52,12 +52,17 @@ def _setup_mcp():
     return registered
 
 
+def _exact_then_corpus(exact, corpus):
+    """search_library uses top(q=...) for exact search and top() pages for fuzzy."""
+    return lambda **kwargs: exact if "q" in kwargs else corpus
+
+
 class TestFuzzyLibrarySearch:
     def test_exact_search_returns_results(self, monkeypatch):
         registered = _setup_mcp()
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = [FAKE_ITEMS[0]]
+        mock_zot.top.return_value = [FAKE_ITEMS[0]]
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -70,8 +75,7 @@ class TestFuzzyLibrarySearch:
         registered = _setup_mcp()
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = []
-        mock_zot.top.return_value = FAKE_ITEMS
+        mock_zot.top.side_effect = _exact_then_corpus([], FAKE_ITEMS)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -84,8 +88,7 @@ class TestFuzzyLibrarySearch:
         registered = _setup_mcp()
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = []
-        mock_zot.top.return_value = FAKE_ITEMS
+        mock_zot.top.side_effect = _exact_then_corpus([], FAKE_ITEMS)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -97,8 +100,7 @@ class TestFuzzyLibrarySearch:
         registered = _setup_mcp()
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = []
-        mock_zot.top.return_value = FAKE_ITEMS
+        mock_zot.top.side_effect = _exact_then_corpus([], FAKE_ITEMS)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -114,8 +116,7 @@ class TestFuzzyLibrarySearch:
         ]
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = []
-        mock_zot.top.return_value = items_with_attachment
+        mock_zot.top.side_effect = _exact_then_corpus([], items_with_attachment)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -132,8 +133,7 @@ class TestFuzzyLibrarySearch:
         ]
 
         mock_zot = MagicMock()
-        mock_zot.items.return_value = []
-        mock_zot.top.return_value = deep_items
+        mock_zot.top.side_effect = _exact_then_corpus([], deep_items)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)

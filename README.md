@@ -275,6 +275,66 @@ configured personal library, even when the same server accesses shared groups.
 
 > **Note:** If all three `ZOTERO_WEBDAV_*` variables are set, attachments in the configured personal library use WebDAV instead of Zotero's built-in storage. Group attachments always use Zotero storage. The server automatically appends `/zotero` to the WebDAV base URL, matching Zotero Desktop's behavior.
 
+## Version 0.10.1
+
+- **Attaching files to Zotero storage works again** (group libraries and setups
+  without WebDAV): Zotero rejects the full local path Pyzotero sent as the
+  filename. Uploads are now confirmed, and a rate-limited or failed upload is
+  reported instead of leaving an empty attachment.
+- `list_tags` returns every tag; Zotero's tag paging metadata is wrong past
+  200 tags, which made the old listing drop the rest.
+- Leftover query parameters no longer leak between calls (e.g. a duplicate
+  check after fetching an item template only searched items of that type).
+- Searches and tag renames containing the word "tags" no longer crash.
+- Tagging, filing, and editing notes or annotations works on trashed items.
+- Highlights land correctly on rotated pages with offset crop boxes, match
+  whole words, check for duplicates at the same location only, and report a
+  missing `occurrence` instead of highlighting a different passage.
+- arXiv imports detect existing copies of any version of the paper.
+- CrossRef imports keep organization authors and editors and map books,
+  edited books, chapters, and dissertations to the right item types; Open
+  Library books get their authors from the work record.
+- `verify_items` handles DataCite DOIs (arXiv, Zenodo), HTML in CrossRef titles,
+  and subtitles; `health_check` reports read-only keys as `write_access: false`.
+- BibTeX exports keep Zotero's order and unique citekeys across pages.
+- Lists of child items (attachments, notes, annotations) are no longer capped at
+  100; linked PDFs are skipped, and standalone PDFs can be read.
+- Removing the last tag color works; deleting tags containing `||` is refused.
+- Hardening for hosted HTTP deployments: downloads connect to the validated IP
+  (DNS rebinding), JWKS refetches are rate-limited, and file saves use
+  exclusive temporary files.
+- **DOI imports no longer create duplicates.** Zotero's search does not index
+  DOIs, so the old check never matched; imports now search the resolved title
+  and compare DOIs (including `DOI:` lines in Extra).
+- **ISBN imports no longer create duplicates** of books stored with hyphenated
+  ISBNs; ISBN-10 and ISBN-13 forms now match each other.
+- `search_library` returns papers instead of matching attachments and notes.
+- Rate-limited writes are never retried (a retry could duplicate the item) and
+  now fail instead of reporting success.
+- `add_papers_by_dois(attach_pdfs=True)` downloads PDFs in parallel.
+- `search_fulltext` and `search` query top-level items (about 20x faster).
+- Fuzzy search and `find_duplicates` reuse a library cache that is kept current
+  with Zotero's incremental sync (`since=`), so repeat calls take well under a second.
+- CrossRef requests use `UNPAYWALL_EMAIL` as the polite-pool contact when
+  `CROSSREF_MAILTO` is unset, and retry rate-limited requests.
+- `create_annotation` highlights quotes that wrap across lines in full, counts
+  `occurrence` across pages, and uses the PDF's own page labels.
+- PDFs attached during DOI/arXiv import are named after the item title, and the
+  result now says why a PDF was not attached.
+- List output shows the correct year for dates like `12/1/1993`.
+- `health_check` returns `library_type` as `user`/`group` and reports whether
+  open-access PDF lookup (`UNPAYWALL_EMAIL`) is configured.
+- New `list_trash` tool for finding keys to pass to `restore_item`.
+- Faster `get_bibtex` for item keys, `rename_tag`, `get_recent_items`, fuzzy
+  searches, and `find_duplicates`; Zotero API connections are reused across calls.
+- Full-library and collection `get_bibtex` exports stop downloading once
+  `max_chars` is exceeded.
+- `get_item_fulltext` prefers a PDF's index over a web snapshot's.
+- `find_duplicates` reports `items_scanned` and `scan_capped`.
+- `search` falls back to the item's zotero.org link when it has no URL.
+- Shorter tool descriptions; library targeting is explained once in the server
+  instructions.
+
 ## Version 0.10.0
 
 - Discover personal and shared libraries with `list_libraries`.

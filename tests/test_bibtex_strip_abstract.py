@@ -55,7 +55,7 @@ class TestBibtexStripAbstract:
     def test_abstract_stripped_by_default(self, monkeypatch):
         registered = _setup_mcp()
         mock_zot = MagicMock()
-        mock_zot.item.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
+        mock_zot.items.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -68,7 +68,7 @@ class TestBibtexStripAbstract:
     def test_abstract_included_when_requested(self, monkeypatch):
         registered = _setup_mcp()
         mock_zot = MagicMock()
-        mock_zot.item.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
+        mock_zot.items.return_value = _make_bibdb([SAMPLE_ENTRIES[0].copy()])
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -81,12 +81,13 @@ class TestBibtexStripAbstract:
         registered = _setup_mcp()
         mock_zot = MagicMock()
         entries = [e.copy() for e in SAMPLE_ENTRIES]
-        mock_zot.item.side_effect = [_make_bibdb([entries[0]]), _make_bibdb([entries[1]])]
+        mock_zot.items.return_value = _make_bibdb(entries)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
 
         result = asyncio.run(registered["get_bibtex"](item_keys=["K001", "K002"]))
+        mock_zot.items.assert_called_once_with(itemKey="K001,K002", format="bibtex")
         assert "Attention Is All You Need" in result
         assert "Deep Residual Learning" in result
         assert "abstract" not in result.lower()
@@ -95,7 +96,7 @@ class TestBibtexStripAbstract:
         registered = _setup_mcp()
         mock_zot = MagicMock()
         entries = [e.copy() for e in SAMPLE_ENTRIES]
-        mock_zot.collection_items.return_value = _make_bibdb(entries)
+        mock_zot.collection_items_top.return_value = _make_bibdb(entries)
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)
@@ -113,7 +114,7 @@ class TestBibtexStripAbstract:
   abstract = {The dominant sequence transduction models are complex.},
   year = {2017},
 }"""
-        mock_zot.item.return_value = raw_bib
+        mock_zot.items.return_value = raw_bib
 
         import zotero_mcp.library as lib_mod
         monkeypatch.setattr(lib_mod, "_get_zot", lambda *_args: mock_zot)

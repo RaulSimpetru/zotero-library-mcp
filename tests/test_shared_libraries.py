@@ -20,7 +20,7 @@ def clients(monkeypatch):
     monkeypatch.setenv("ZOTERO_API_KEY", "test-key")
     created = []
 
-    def factory(library_id, library_type, api_key):
+    def factory(library_id, library_type, api_key, client=None):
         assert api_key == "test-key"
         zot = MagicMock()
         zot.library_id = library_id
@@ -36,6 +36,7 @@ def clients(monkeypatch):
                 }
             }
         ]
+        zot.top.return_value = zot.items.return_value
         zot.item.return_value = {
             "version": 7,
             "data": {
@@ -60,7 +61,7 @@ def clients(monkeypatch):
         created.append(zot)
         return zot
 
-    monkeypatch.setattr(helpers.zotero, "Zotero", factory)
+    monkeypatch.setattr(helpers, "_Zotero", factory)
     return created
 
 
@@ -84,15 +85,15 @@ def test_discovery_uses_key_owner_when_default_is_group(clients, monkeypatch):
 
 
 def test_discovery_pagination_and_read_only_permissions(clients, monkeypatch):
-    original = helpers.zotero.Zotero
+    original = helpers._Zotero
 
-    def factory(*args):
-        zot = original(*args)
+    def factory(*args, **kwargs):
+        zot = original(*args, **kwargs)
         zot.request.headers = {"Total-Results": "3"}
         zot.groups.return_value = [{"id": 789, "data": {"name": "Read only"}}]
         return zot
 
-    monkeypatch.setattr(helpers.zotero, "Zotero", factory)
+    monkeypatch.setattr(helpers, "_Zotero", factory)
     result = call("list_libraries", limit=1, start=1).structured_content
     assert result["next_start"] == 2
     assert result["group_total"] == 3
@@ -167,14 +168,14 @@ def test_mutation_uses_selected_group_only(clients):
 
 
 def test_denied_group_does_not_fall_back_to_personal_library(clients, monkeypatch):
-    original = helpers.zotero.Zotero
+    original = helpers._Zotero
 
-    def factory(*args):
-        zot = original(*args)
-        zot.items.side_effect = PermissionError("Forbidden")
+    def factory(*args, **kwargs):
+        zot = original(*args, **kwargs)
+        zot.top.side_effect = PermissionError("Forbidden")
         return zot
 
-    monkeypatch.setattr(helpers.zotero, "Zotero", factory)
+    monkeypatch.setattr(helpers, "_Zotero", factory)
     result = call(
         "search_library", query="paper", library_id="456", library_type="group"
     )
@@ -192,16 +193,16 @@ def test_nested_search_and_fetch_preserve_library(clients):
 
 
 def test_save_bibtex_forwards_library_to_export(clients, monkeypatch, tmp_path):
-    original = helpers.zotero.Zotero
+    original = helpers._Zotero
 
-    def factory(*args):
-        zot = original(*args)
-        zot.item.return_value = bibtexparser.loads(
+    def factory(*args, **kwargs):
+        zot = original(*args, **kwargs)
+        zot.items.return_value = bibtexparser.loads(
             "@article{shared, title={Shared library paper}, year={2026}}"
         )
         return zot
 
-    monkeypatch.setattr(helpers.zotero, "Zotero", factory)
+    monkeypatch.setattr(helpers, "_Zotero", factory)
     configure_runtime(transport="stdio")
     destination = tmp_path / "shared.bib"
     result = call(
@@ -275,9 +276,14 @@ def test_group_pdf_upload_uses_zotero_storage(clients, monkeypatch, tmp_path):
     monkeypatch.setattr(helpers, "_attach_file_local", local_upload)
     monkeypatch.setattr(helpers, "_attach_file_webdav", webdav_upload)
     result = asyncio.run(
-        helpers._attach_pdf_from_url(zot, "SAMEKEY1", "https://example.org/paper.pdf")
+        helpers._attach_pdf_from_url(
+            zot, "SAMEKEY1", "https://example.org/paper.pdf", "A/B: Paper"
+        )
     )
     assert result == "PDF12345"
-    local_upload.assert_awaited_once_with(zot, "SAMEKEY1", str(pdf))
+    uploaded_path = local_upload.await_args.args[2]
+    assert local_upload.await_args.args[:2] == (zot, "SAMEKEY1")
+    assert Path(uploaded_path).name == "A B Paper.pdf"
+    assert not Path(uploaded_path).exists()
     webdav_upload.assert_not_awaited()
     assert not pdf.exists()

@@ -1,11 +1,10 @@
 """Tools for managing Zotero tags."""
 
-import asyncio
 import re
 from typing import Literal
 
-from ._helpers import _get_zot, _validate_limit, _zot_call
-from .responses import tool_error
+from ._helpers import _fetch_all, _get_zot, _patch_item, _validate_limit, _zot_call
+from .responses import sanitize_error_message, tool_error
 from .tool_annotations import DESTRUCTIVE, READ_ONLY, WRITE
 
 
@@ -16,10 +15,10 @@ def _normalize_tags(tags: list[str]) -> list[str]:
         cleaned = tag.strip()
         if not cleaned:
             raise ValueError("Tags must not be empty")
-        folded = cleaned.casefold()
-        if folded not in seen:
+        # Exact dedupe: Zotero treats "ML" and "ml" as different tags.
+        if cleaned not in seen:
             normalized.append(cleaned)
-            seen.add(folded)
+            seen.add(cleaned)
     if not normalized:
         raise ValueError("At least one tag is required")
     if len(normalized) > 50:
@@ -41,14 +40,17 @@ async def _get_tag_colors(zot) -> tuple[list[dict], int]:
 
 async def _put_tag_colors(zot, colors: list[dict], version: int) -> None:
     url = f"{zot.endpoint}/{zot.library_type}/{zot.library_id}/settings/tagColors"
-    headers = {"Content-Type": "application/json"}
-    if zot.api_key:
-        headers["Zotero-API-Key"] = zot.api_key
     response = await _zot_call(
-        zot.client.put,
-        url,
-        headers=headers,
-        json={"value": colors, "version": version},
+        zot.client.put, url, json={"value": colors, "version": version}
+    )
+    response.raise_for_status()
+
+
+async def _delete_tag_colors(zot, version: int) -> None:
+    # Zotero rejects {"value": []}, so clearing the last color deletes the setting.
+    url = f"{zot.endpoint}/{zot.library_type}/{zot.library_id}/settings/tagColors"
+    response = await _zot_call(
+        zot.client.delete, url, headers={"If-Unmodified-Since-Version": str(version)}
     )
     response.raise_for_status()
 
@@ -64,21 +66,19 @@ def register(mcp):
 
         Args:
             limit: Maximum number of tags to return (default 100)
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             limit = _validate_limit(limit, maximum=1000)
             zot = _get_zot(library_id, library_type)
-            all_tags = await _zot_call(lambda: zot.everything(zot.tags()))
+            all_tags = await _fetch_all(zot.tags)
         except Exception as e:
             return tool_error(f"Could not fetch tags: {e}")
 
         if not all_tags:
             return "No tags in library."
 
-        sorted_tags = sorted(all_tags, key=lambda t: t.lower())
+        # /tags lists a name once per type (manual and automatic).
+        sorted_tags = sorted(set(all_tags), key=str.casefold)
 
         total = len(sorted_tags)
         sorted_tags = sorted_tags[:limit]
@@ -95,12 +95,13 @@ def register(mcp):
 
         Args:
             tags: List of tag names to delete from the library
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
+            if any("||" in tag for tag in tags):
+                # Pyzotero joins tags with " || ", the API's OR operator, so
+                # "a || b" would delete the tags "a" and "b" instead.
+                raise ValueError("Tags containing '||' cannot be deleted through this tool")
             zot = _get_zot(library_id, library_type)
             await _zot_call(zot.delete_tags, *tags)
         except Exception as e:
@@ -122,9 +123,6 @@ def register(mcp):
             item_key: The Zotero item key
             tags: List of tags to add
             color: Optional hex color code (e.g. '#FF0000') to assign to the added tags
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
@@ -151,10 +149,18 @@ def register(mcp):
         except Exception as e:
             return tool_error(f"Could not find item {item_key}: {e}")
 
-        title = item.get("data", {}).get("title", item_key)
+        data = item.get("data", {})
+        title = data.get("title", item_key)
+        current = data.get("tags", [])
+        present = {tag.get("tag") for tag in current}
+        new_tags = current + [{"tag": tag} for tag in tags if tag not in present]
 
         try:
-            await _zot_call(zot.add_tags, item, *tags)
+            # Partial PATCH: works for trashed items, unlike update_item.
+            await _zot_call(
+                _patch_item, zot, data.get("key", item_key), int(data.get("version", item.get("version"))),
+                {"tags": new_tags},
+            )
         except Exception as e:
             return tool_error(f"Failed to add tags: {e}")
 
@@ -197,9 +203,6 @@ def register(mcp):
         Args:
             item_key: The Zotero item key
             tags: List of tags to remove
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             tags = _normalize_tags(tags)
@@ -215,16 +218,25 @@ def register(mcp):
         data = item.get("data", {})
         title = data.get("title", item_key)
         current_tags = data.get("tags", [])
-        tags_lower = {t.lower() for t in tags}
-        new_tags = [t for t in current_tags if t.get("tag", "").lower() not in tags_lower]
+        # Exact matches first; fall back to case-insensitive only when a
+        # requested tag has no exact match on this item.
+        names = {t.get("tag", "") for t in current_tags}
+        exact = {tag for tag in tags if tag in names}
+        loose = {tag.casefold() for tag in tags if tag not in names}
+        new_tags = [
+            t for t in current_tags
+            if t.get("tag", "") not in exact and t.get("tag", "").casefold() not in loose
+        ]
 
         removed_count = len(current_tags) - len(new_tags)
         if removed_count == 0:
             return f"None of the specified tags were found on '{title}'."
 
-        data["tags"] = new_tags
         try:
-            await _zot_call(zot.update_item, data)
+            await _zot_call(
+                _patch_item, zot, data.get("key", item_key), int(data.get("version", item.get("version"))),
+                {"tags": new_tags},
+            )
         except Exception as e:
             return tool_error(f"Failed to update item: {e}")
 
@@ -244,9 +256,6 @@ def register(mcp):
             tag: The tag name to colorize
             color: Hex color code (e.g. '#FF0000' for red, '#3366CC' for blue)
             position: Sort position for the colored tag (0-8, lower = higher priority)
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         try:
             tag = tag.strip()
@@ -284,9 +293,6 @@ def register(mcp):
         Args:
             old_name: The current tag name
             new_name: The new tag name to replace it with
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
         old_name = old_name.strip()
         new_name = new_name.strip()
@@ -294,17 +300,17 @@ def register(mcp):
             return tool_error("old_name and new_name must not be empty")
         if old_name.casefold() == new_name.casefold():
             return "Tag already has the requested name."
-        zot = _get_zot(library_id, library_type)
-
         try:
-            items = await _zot_call(lambda: zot.everything(zot.items(tag=old_name)))
+            zot = _get_zot(library_id, library_type)
+            items = await _fetch_all(zot.items, tag=old_name)
         except Exception as e:
             return tool_error(f"Could not search for tag '{old_name}': {e}")
 
         if not items:
             return f"No items found with tag '{old_name}'."
 
-        async def _rename_one(item: dict) -> tuple[bool, str | None]:
+        changed_items = []
+        for item in items:
             data = item.get("data", {})
             tags = data.get("tags", [])
 
@@ -322,28 +328,30 @@ def register(mcp):
                 else:
                     new_tags.append(t)
 
-            if not found:
-                return False, None
+            if found:
+                data["tags"] = new_tags
+                changed_items.append(data)
 
-            data["tags"] = new_tags
+        errors = []
+        updated = 0
+        # Batch writes (pyzotero sends 50 per request) instead of one per item.
+        for offset in range(0, len(changed_items), 50):
+            batch = changed_items[offset:offset + 50]
             try:
-                await _zot_call(zot.update_item, data)
-                return True, None
+                await _zot_call(zot.update_items, batch)
+                # Zotero reports per-item failures (e.g. version conflicts)
+                # inside a 200 response, which pyzotero does not raise on.
+                failed = zot.request.json().get("failed", {})
+                updated += len(batch) - len(failed)
+                errors.extend(
+                    f"{batch[int(index)].get('key', '?')}: {failure.get('message', failure)}"
+                    for index, failure in failed.items()
+                )
             except Exception as e:
-                return False, f"{data.get('key', '?')}: {e}"
-
-        semaphore = asyncio.Semaphore(8)
-
-        async def _bounded(item: dict):
-            async with semaphore:
-                return await _rename_one(item)
-
-        outcomes = await asyncio.gather(*(_bounded(item) for item in items))
-        updated = sum(success for success, _ in outcomes)
-        errors = [error for _, error in outcomes if error]
+                errors.append(f"items {offset + 1}-{offset + len(batch)}: {sanitize_error_message(str(e))}")
 
         try:
-            colors, version = await _get_tag_colors(zot)
+            colors, version = await _get_tag_colors(zot) if updated else ([], 0)
             old_folded = old_name.casefold()
             new_folded = new_name.casefold()
             changed = False
@@ -363,7 +371,7 @@ def register(mcp):
                     tag_color["position"] = index
                 await _put_tag_colors(zot, updated_colors, version)
         except Exception as exc:
-            errors.append(f"tag color: {exc}")
+            errors.append(f"tag color: {sanitize_error_message(str(exc))}")
 
         result = f"Renamed tag '{old_name}' → '{new_name}' on {updated} item(s)."
         if errors:
@@ -377,9 +385,6 @@ def register(mcp):
         library_type: Literal["user", "group"] | None = None,
     ) -> str:
         """Remove a tag's assigned library color without deleting the tag.
-
-        Pass both library_id and library_type to target another library;
-        omit both to use the configured default.
         """
 
         tag = tag.strip()
@@ -397,7 +402,10 @@ def register(mcp):
                 return f"Tag '{tag}' does not have an assigned color."
             for index, color in enumerate(remaining):
                 color["position"] = index
-            await _put_tag_colors(zot, remaining, version)
+            if remaining:
+                await _put_tag_colors(zot, remaining, version)
+            else:
+                await _delete_tag_colors(zot, version)
             return f"Removed color from tag '{tag}'."
         except Exception as exc:
             return tool_error(f"Failed to remove tag color: {exc}")
